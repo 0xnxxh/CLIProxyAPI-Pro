@@ -676,7 +676,7 @@ func (s *accountInspectionScheduler) inspectAntigravity(ctx context.Context, acc
 		}
 		status := intPtr(resp.StatusCode)
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			if resp.StatusCode == 403 || resp.StatusCode == 404 {
+			if isAccountErrorStatus(resp.StatusCode) {
 				priorityStatus = status
 			}
 			continue
@@ -704,7 +704,7 @@ func (s *accountInspectionScheduler) inspectClaude(ctx context.Context, account 
 		return accountInspectionDecision{}, status, err
 	}
 	if usageResp.StatusCode < 200 || usageResp.StatusCode >= 300 {
-		if usageResp.StatusCode == 401 || usageResp.StatusCode == 403 {
+		if isAccountErrorStatus(usageResp.StatusCode) {
 			return authErrorDecision(account, usageResp.StatusCode), status, nil
 		}
 		return accountInspectionDecision{}, status, fmt.Errorf("HTTP %d", usageResp.StatusCode)
@@ -768,7 +768,7 @@ func (s *accountInspectionScheduler) inspectGeminiCLI(ctx context.Context, accou
 		return accountInspectionDecision{}, status, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		if isAccountErrorStatus(resp.StatusCode) {
 			return authErrorDecision(account, resp.StatusCode), status, nil
 		}
 		return accountInspectionDecision{}, status, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -838,7 +838,7 @@ func (s *accountInspectionScheduler) inspectKimi(ctx context.Context, account ac
 		return accountInspectionDecision{}, status, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		if isAccountErrorStatus(resp.StatusCode) {
 			return authErrorDecision(account, resp.StatusCode), status, nil
 		}
 		return accountInspectionDecision{}, status, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -883,6 +883,10 @@ func (s *accountInspectionScheduler) claudeHeaders() map[string]string {
 	return headers
 }
 
+func isAccountErrorStatus(status int) bool {
+	return status == 400 || status == 401 || status == 403 || status == 404
+}
+
 func authErrorDecision(account accountInspectionAccount, status int) accountInspectionDecision {
 	if account.Disabled {
 		return accountInspectionDecision{Action: "keep", ActionReason: fmt.Sprintf("接口返回 %d，但账号已禁用", status)}
@@ -915,7 +919,7 @@ func codexDecision(account accountInspectionAccount, status int, used *float64, 
 	if status == 401 {
 		return accountInspectionDecision{Action: "delete", ActionReason: "接口返回 401，建议删除失效账号", UsedPercent: used}
 	}
-	if status == 403 {
+	if isAccountErrorStatus(status) {
 		return authErrorDecision(account, status)
 	}
 	if isQuota || (used != nil && *used >= float64(threshold)) {
@@ -979,7 +983,7 @@ func autoActionForResult(result accountInspectionResult, settings accountInspect
 	if result.StatusCode != nil {
 		status = *result.StatusCode
 	}
-	accountError := status == 401 || status == 403 || (!result.IsQuota && status >= 400)
+	accountError := isAccountErrorStatus(status) || (!result.IsQuota && status >= 400)
 	if accountError {
 		if settings.AutoExecuteAccountErrorAction == "delete" {
 			return "delete"
