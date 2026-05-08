@@ -35,6 +35,39 @@ replace_once(
     f'defaultManagementReleaseURL  = "{PRO_PANEL_RELEASE_API}"',
 )
 
+replace_once(
+    updater,
+    '''\treq.Header.Set("Accept", "application/vnd.github+json")
+\treq.Header.Set("User-Agent", httpUserAgent)
+\tgitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
+\tif tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
+\t\treq.Header.Set("Authorization", "Bearer "+tok)
+\t}
+''',
+    '''\treq.Header.Set("Accept", "application/vnd.github+json")
+\treq.Header.Set("User-Agent", httpUserAgent)
+\tif tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && isGitHubReleaseURL(releaseURL) {
+\t\treq.Header.Set("Authorization", "Bearer "+tok)
+\t}
+''',
+)
+
+replace_once(
+    updater,
+    '''func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
+''',
+    '''func isGitHubReleaseURL(releaseURL string) bool {
+\tparsed, err := url.Parse(strings.TrimSpace(releaseURL))
+\tif err != nil || parsed.Host == "" {
+\t\treturn false
+\t}
+\treturn strings.Contains(strings.ToLower(parsed.Host), "github.com")
+}
+
+func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
+''',
+)
+
 server = ROOT / 'internal/api/server.go'
 management_scheduler = ROOT / 'internal/api/handlers/management/account_inspection_scheduler.go'
 scheduler_source = Path('/tmp/account_inspection_scheduler.go')
