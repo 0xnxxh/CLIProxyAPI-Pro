@@ -18,22 +18,29 @@
 
 .page {
   display: grid;
-  gap: 18px;
+  gap: 24px;
   min-width: 0;
 }
 
-.heroCard,
+.heroCard:global(.card),
+.heroCard {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .summaryCard,
 .panel {
   border: 1px solid var(--inspect-line);
-  border-radius: 16px;
+  border-radius: 12px;
   background: var(--inspect-surface);
   box-shadow: var(--shadow);
 }
 
-.heroCard,
 .panel {
-  padding: 20px;
+  padding: 24px;
 }
 
 .heroHeader,
@@ -49,6 +56,16 @@
 
 .heroCopy {
   max-width: 760px;
+}
+
+.heroTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--inspect-ink);
+}
+
+.heroSubtitle {
+  font-size: 14px;
 }
 
 .heroCopy,
@@ -68,7 +85,6 @@
 }
 
 .heroTitle {
-  font-size: 28px;
   line-height: 1.15;
   letter-spacing: 0;
 }
@@ -278,28 +294,30 @@
 }
 
 .summaryGrid {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
 }
 
 .summaryGridCompact {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .summaryCard {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   padding: 16px;
+  border-radius: 8px;
 }
 
 .summaryCard span {
   color: var(--inspect-muted);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
 }
 
 .summaryCard strong {
-  font-size: 24px;
-  line-height: 1;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.1;
   letter-spacing: 0;
 }
 
@@ -483,37 +501,44 @@
 
 .logList {
   display: grid;
-  gap: 8px;
-  max-height: 360px;
+  gap: 6px;
+  max-height: min(520px, calc(100vh - 260px));
   overflow: auto;
-  padding-right: 4px;
+  padding: 12px;
+  border: 1px solid var(--inspect-line);
+  border-radius: 8px;
+  background: var(--inspect-surface-muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 .logRow {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: 170px minmax(0, 1fr);
   gap: 12px;
   align-items: start;
-  padding: 12px 14px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 16px;
-  background: var(--inspect-surface-muted);
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 12px;
 }
 
 .logInfo {
-  border-color: color-mix(in srgb, var(--inspect-accent) 18%, var(--inspect-line));
+  color: var(--inspect-ink);
 }
 
 .logSuccess {
-  border-color: color-mix(in srgb, var(--inspect-green) 30%, var(--inspect-line));
+  color: var(--inspect-green);
 }
 
 .logWarning {
-  border-color: color-mix(in srgb, var(--inspect-amber) 34%, var(--inspect-line));
+  color: var(--inspect-amber);
+  background: color-mix(in srgb, var(--inspect-amber) 10%, transparent);
 }
 
 .logError {
-  border-color: color-mix(in srgb, var(--inspect-red) 34%, var(--inspect-line));
+  color: var(--inspect-red);
+  background: color-mix(in srgb, var(--inspect-red) 10%, transparent);
 }
 
 .logTime {
@@ -577,6 +602,13 @@
   gap: 8px;
 }
 
+.filterTabs {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--inspect-line) 60%, transparent);
+  background: color-mix(in srgb, var(--inspect-surface-muted) 60%, transparent);
+}
+
 .filterTab,
 .logLevelTab {
   display: inline-flex;
@@ -584,39 +616,56 @@
   gap: 8px;
   min-height: 34px;
   padding: 0 12px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 999px;
-  background: var(--inspect-surface-muted);
+  border: 1px solid color-mix(in srgb, var(--inspect-line) 60%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--inspect-surface-muted) 70%, transparent);
   color: var(--inspect-muted);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
   cursor: pointer;
   transition:
-    border-color 0.18s ease,
-    background-color 0.18s ease,
-    color 0.18s ease;
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 
 .filterTab strong {
-  color: var(--inspect-ink);
-  font-size: 12px;
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--inspect-line) 24%, transparent);
+  color: var(--text-tertiary, var(--inspect-muted));
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .filterTabActive,
 .logLevelTabActive {
-  border-color: color-mix(in srgb, var(--inspect-accent) 42%, var(--inspect-line));
-  background: color-mix(in srgb, var(--inspect-accent) 12%, var(--inspect-surface));
+  border-color: color-mix(in srgb, var(--inspect-accent) 50%, var(--inspect-line));
+  background: color-mix(in srgb, var(--inspect-accent-soft) 22%, var(--inspect-surface-muted));
+  color: var(--inspect-ink);
+}
+
+.filterTabActive strong {
+  background: color-mix(in srgb, var(--inspect-accent) 22%, transparent);
   color: var(--inspect-accent);
 }
 
 .healthBadge {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 24px;
+  padding: 0 8px;
   border-radius: 999px;
+  border: 1px solid transparent;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -644,9 +693,10 @@
 }
 
 .tableWrap {
+  max-height: min(620px, calc(100vh - 220px));
   overflow: auto;
   border: 1px solid var(--inspect-line);
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 .table {
@@ -694,10 +744,12 @@
 
 .table th,
 .table td {
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--inspect-line);
   text-align: left;
   vertical-align: top;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .table th {
@@ -705,11 +757,9 @@
   top: 0;
   z-index: 1;
   background: var(--inspect-surface-muted);
-  color: var(--inspect-muted);
+  color: var(--inspect-ink);
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .table tbody tr:nth-child(2n) td {
@@ -742,11 +792,12 @@
 .actionBadge {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 24px;
+  padding: 0 8px;
   border-radius: 999px;
+  border: 1px solid transparent;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .actionKeep {
@@ -837,7 +888,6 @@
 }
 
 @media (max-width: 640px) {
-  .heroCard,
   .panel {
     padding: 16px;
     border-radius: 12px;
