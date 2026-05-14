@@ -504,6 +504,132 @@
   gap: 12px;
 }
 
+.rankingGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.rankingCard,
+.focusPanel {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--monitor-line);
+  border-radius: 12px;
+  background: var(--monitor-surface);
+  box-shadow: var(--shadow);
+}
+
+.rankingHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.rankingHeader h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.rankingHeader p {
+  margin: 6px 0 0;
+  color: var(--monitor-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rankingList,
+.analysisList {
+  display: grid;
+  gap: 10px;
+}
+
+.rankingRow,
+.analysisRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--monitor-line) 70%, transparent);
+  background: color-mix(in srgb, var(--monitor-surface-elevated) 76%, var(--monitor-surface));
+}
+
+.analysisRow {
+  justify-content: space-between;
+}
+
+.rankingIndex {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--monitor-accent-soft);
+  color: var(--monitor-accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.rankingMain {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.rankingTitleLine,
+.rankingMetaLine {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rankingTitleLine strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rankingTitleLine span {
+  color: var(--monitor-ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.rankingMetaLine {
+  justify-content: flex-start;
+  color: var(--monitor-muted);
+  font-size: 11px;
+}
+
+.rankingBar {
+  position: relative;
+  overflow: hidden;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--monitor-line) 72%, transparent);
+}
+
+.rankingBar::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--ranking-width, 0%);
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--monitor-accent), var(--monitor-cyan));
+}
+
 .summaryCard {
   display: grid;
   gap: 6px;
@@ -1465,6 +1591,136 @@
 //  background: color-mix(in srgb, var(--monitor-red) 5%, var(--monitor-surface-hover));
 //}
 
+.focusPanel {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, 2.4fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.focusHeader {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.focusKicker,
+.focusMetrics span {
+  color: var(--monitor-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.focusHeader strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focusMetrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.focusMetrics div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--monitor-surface-elevated);
+}
+
+.focusMetrics strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysisTabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 16px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--monitor-line);
+  background: var(--monitor-surface-muted);
+}
+
+.analysisTabButton {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--monitor-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.analysisTabButtonActive {
+  background: var(--monitor-accent);
+  color: var(--primary-contrast, #fff);
+}
+
+.trendGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(42px, 1fr));
+  align-items: end;
+  gap: 8px;
+  min-height: 220px;
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid var(--monitor-line);
+  background: var(--monitor-surface-elevated);
+}
+
+.trendItem {
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  gap: 6px;
+  align-items: end;
+  justify-items: center;
+  min-width: 0;
+  height: 188px;
+}
+
+.trendBarTrack {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 34px;
+  height: 128px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--monitor-line) 72%, transparent);
+}
+
+.trendBarFill {
+  position: absolute;
+  inset: auto 0 0;
+  height: var(--trend-height, 0%);
+  border-radius: inherit;
+  background: linear-gradient(180deg, var(--monitor-cyan), var(--monitor-accent));
+}
+
+.trendItem strong {
+  font-size: 12px;
+}
+
+.trendItem span:last-child {
+  color: var(--monitor-muted);
+  font-size: 11px;
+}
+
 .emptyBlock,
 .emptyTable,
 .emptyBlockSmall {
@@ -1506,7 +1762,8 @@
 }
 
 @container monitoring-page (max-width: 900px) {
-  .summaryGrid {
+  .summaryGrid,
+  .rankingGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1710,6 +1967,15 @@
   }
 
   .filterGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rankingGrid,
+  .focusPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .focusMetrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

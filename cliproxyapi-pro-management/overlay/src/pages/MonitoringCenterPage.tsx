@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
@@ -70,10 +70,12 @@ const ACCOUNT_GROUP_OPTIONS: Array<{ value: MonitoringAccountGroupBy; labelKey: 
   { value: 'model', labelKey: 'monitoring.group_by_model' },
 ];
 
-const DEFAULT_ACCOUNT_SORT = {
-  key: 'lastSeenAt',
-  direction: 'desc',
-} as const;
+const ANALYSIS_TAB_OPTIONS: Array<{ value: AnalysisTab; labelKey: string }> = [
+  { value: 'trend', labelKey: 'monitoring.analysis_tab_trend' },
+  { value: 'failures', labelKey: 'monitoring.analysis_tab_failures' },
+  { value: 'cost', labelKey: 'monitoring.analysis_tab_cost' },
+  { value: 'logs', labelKey: 'monitoring.analysis_tab_logs' },
+];
 
 type StatusFilter = 'all' | 'success' | 'failed';
 
@@ -95,6 +97,27 @@ type SummaryCardProps = {
 type FocusScope = {
   type: MonitoringAccountGroupBy;
   value: string;
+};
+
+type AnalysisTab = 'trend' | 'failures' | 'cost' | 'logs';
+
+type TrendPoint = {
+  key: string;
+  label: string;
+  requests: number;
+  failures: number;
+  tokens: number;
+  cost: number;
+};
+
+type FailureAnalysisRow = {
+  key: string;
+  label: string;
+  meta: string;
+  failures: number;
+  totalCalls: number;
+  failureRate: number;
+  lastSeenAt: number;
 };
 
 type PriceDraft = {
@@ -287,6 +310,12 @@ type AccountSummaryMetric = {
   valueClassName?: string;
 };
 
+const getDefaultAccountSort = (groupBy: MonitoringAccountGroupBy): AccountSortState => ({
+  key: groupBy === 'account' ? 'lastSeenAt' : groupBy === 'apiKey' ? 'totalCalls' : 'totalCost',
+  direction: 'desc',
+});
+
+
 const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
 const joinShort = (values: string[], limit = 2) => {
@@ -308,6 +337,65 @@ const parsePriceValue = (value: string) => {
 };
 
 const formatPriceUnit = (value: number) => `$${value.toFixed(4)}/1M`;
+
+const buildTrendPoints = (rows: MonitoringEventRow[]): TrendPoint[] => {
+  const grouped = new Map<string, TrendPoint>();
+  const useHourly = new Set(rows.map((row) => row.dayKey)).size <= 1;
+
+  rows.forEach((row) => {
+    const key = useHourly ? `${row.dayKey} ${row.hourLabel}` : row.dayKey;
+    const label = useHourly ? row.hourLabel : row.dayKey.slice(5).replace('-', '/');
+    const existing = grouped.get(key) ?? {
+      key,
+      label,
+      requests: 0,
+      failures: 0,
+      tokens: 0,
+      cost: 0,
+    };
+
+    existing.requests += row.statsIncluded ? 1 : 0;
+    existing.failures += row.failed ? 1 : 0;
+    existing.tokens += row.totalTokens;
+    existing.cost += row.totalCost;
+    grouped.set(key, existing);
+  });
+
+  return Array.from(grouped.values()).sort((left, right) => left.key.localeCompare(right.key)).slice(-24);
+};
+
+const buildFailureAnalysisRows = (rows: MonitoringEventRow[]): FailureAnalysisRow[] => {
+  const grouped = new Map<string, FailureAnalysisRow>();
+
+  rows.forEach((row) => {
+    const key = `${row.provider}::${row.channel}::${row.model}`;
+    const existing = grouped.get(key) ?? {
+      key,
+      label: row.model,
+      meta: [row.provider, row.channel].filter(Boolean).join(' · '),
+      failures: 0,
+      totalCalls: 0,
+      failureRate: 0,
+      lastSeenAt: 0,
+    };
+
+    existing.totalCalls += row.statsIncluded ? 1 : 0;
+    existing.failures += row.failed ? 1 : 0;
+    existing.lastSeenAt = Math.max(existing.lastSeenAt, row.timestampMs);
+    grouped.set(key, existing);
+  });
+
+  return Array.from(grouped.values())
+    .map((row) => ({
+      ...row,
+      failureRate: row.totalCalls > 0 ? row.failures / row.totalCalls : 0,
+    }))
+    .filter((row) => row.failures > 0)
+    .sort((left, right) => right.failures - left.failures || right.failureRate - left.failureRate || right.lastSeenAt - left.lastSeenAt)
+    .slice(0, 10);
+};
+
+
 
 const buildRealtimeMetaText = (row: MonitoringEventRow) => {
   const text = `${row.endpointMethod} ${row.endpointPath}`.trim();
@@ -400,6 +488,57 @@ const buildRealtimeLogRows = (rows: MonitoringEventRow[]): RealtimeLogRow[] => {
       right.id.localeCompare(left.id)
   );
 };
+
+function RankingPanel({
+  title,
+  subtitle,
+  rows,
+  maxCalls,
+  emptyText,
+  hasPrices,
+}: {
+  title: string;
+  subtitle: string;
+  rows: MonitoringAccountRow[];
+  maxCalls: number;
+  emptyText: string;
+  hasPrices: boolean;
+}) {
+  return (
+    <Card className={styles.rankingCard}>
+      <div className={styles.rankingHeader}>
+        <div>
+          <h3>{title}</h3>
+          <p>{subtitle}</p>
+        </div>
+      </div>
+      <div className={styles.rankingList}>
+        {rows.map((row, index) => (
+          <div key={row.id} className={styles.rankingRow}>
+            <span className={styles.rankingIndex}>{index + 1}</span>
+            <div className={styles.rankingMain}>
+              <div className={styles.rankingTitleLine}>
+                <strong>{row.account}</strong>
+                <span>{formatCompactNumber(row.totalCalls)}</span>
+              </div>
+              <div className={styles.rankingMetaLine}>
+                <span>{formatPercent(row.successRate)}</span>
+                <span>{formatCompactNumber(row.totalTokens)}</span>
+                <span>{hasPrices ? formatUsd(row.totalCost) : '--'}</span>
+              </div>
+              <span
+                className={styles.rankingBar}
+                style={{ '--ranking-width': `${Math.max((row.totalCalls / maxCalls) * 100, 4)}%` } as CSSProperties}
+                aria-hidden="true"
+              />
+            </div>
+          </div>
+        ))}
+        {rows.length === 0 ? <div className={styles.emptyBlockSmall}>{emptyText}</div> : null}
+      </div>
+    </Card>
+  );
+}
 
 function Panel({ title, subtitle, extra, children, className }: PanelProps) {
   return (
@@ -726,7 +865,8 @@ export function MonitoringCenterPage() {
   const [isImportingUsage, setIsImportingUsage] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [accountQuotaStates, setAccountQuotaStates] = useState<Record<string, AccountQuotaState>>({});
-  const [accountSort, setAccountSort] = useState<AccountSortState>(DEFAULT_ACCOUNT_SORT);
+  const [accountSort, setAccountSort] = useState<AccountSortState>(() => getDefaultAccountSort('account'));
+  const [activeAnalysisTab, setActiveAnalysisTab] = useState<AnalysisTab>('trend');
   const accountQuotaStatesRef = useRef<Record<string, AccountQuotaState>>({});
   const accountQuotaRequestIdsRef = useRef<Record<string, number>>({});
   const deferredSearch = useDeferredValue(searchInput);
@@ -971,8 +1111,44 @@ export function MonitoringCenterPage() {
   );
   const scopedStatsRows = useMemo(() => focusedRows.filter((row) => row.statsIncluded), [focusedRows]);
 
+  const modelRankingRows = useMemo(
+    () => [...buildAccountRows(scopedRows, 'model')]
+      .sort((left, right) => right.totalCalls - left.totalCalls || right.totalCost - left.totalCost)
+      .slice(0, 8),
+    [scopedRows]
+  );
+  const apiKeyRankingRows = useMemo(
+    () => [...buildAccountRows(scopedRows, 'apiKey')]
+      .sort((left, right) => right.totalCalls - left.totalCalls || right.totalCost - left.totalCost)
+      .slice(0, 8),
+    [scopedRows]
+  );
+  const trendPoints = useMemo(() => buildTrendPoints(focusedRows), [focusedRows]);
+  const failureAnalysisRows = useMemo(() => buildFailureAnalysisRows(focusedRows), [focusedRows]);
+  const costRankingRows = useMemo(
+    () => [...buildAccountRows(focusedRows, 'model')]
+      .sort((left, right) => right.totalCost - left.totalCost || right.totalTokens - left.totalTokens)
+      .slice(0, 10),
+    [focusedRows]
+  );
+  const focusLabel = useMemo(() => {
+    if (!focusScope) return '';
+    const row = buildAccountRows(scopedRows, focusScope.type).find((item) => (
+      focusScope.type === 'account'
+        ? item.account === focusScope.value
+        : focusScope.type === 'apiKey'
+          ? item.id === focusScope.value
+          : item.model === focusScope.value
+    ));
+    if (row) return row.account;
+    return focusScope.value;
+  }, [focusScope, scopedRows]);
+  const maxModelRankingCalls = Math.max(...modelRankingRows.map((row) => row.totalCalls), 1);
+  const maxApiKeyRankingCalls = Math.max(...apiKeyRankingRows.map((row) => row.totalCalls), 1);
+  const maxTrendRequests = Math.max(...trendPoints.map((point) => point.requests), 1);
   const scopedSummary = useMemo(() => buildMonitoringSummary(scopedStatsRows), [scopedStatsRows]);
   const accountRows = useMemo(() => buildAccountRows(scopedRows, accountGroupBy), [accountGroupBy, scopedRows]);
+
   const sortedAccountRows = useMemo(() => {
     const directionFactor = accountSort.direction === 'desc' ? -1 : 1;
 
@@ -1475,15 +1651,34 @@ export function MonitoringCenterPage() {
         {combinedError ? <div className={styles.errorBox}>{combinedError}</div> : null}
       </Panel>
 
-      <section className={styles.summaryGrid}>
+      <section className={styles.summaryGrid} aria-label={t('monitoring.usage_stats_title')}>
         {summaryCards.map((card) => (
           <SummaryCard key={card.label} {...card} />
         ))}
       </section>
 
+      <section className={styles.rankingGrid}>
+        <RankingPanel
+          title={t('monitoring.model_stats_title')}
+          subtitle={t('monitoring.model_stats_desc')}
+          rows={modelRankingRows}
+          maxCalls={maxModelRankingCalls}
+          emptyText={t('monitoring.no_data')}
+          hasPrices={hasPrices}
+        />
+        <RankingPanel
+          title={t('monitoring.api_key_ranking_title')}
+          subtitle={t('monitoring.api_key_ranking_desc')}
+          rows={apiKeyRankingRows}
+          maxCalls={maxApiKeyRankingCalls}
+          emptyText={t('monitoring.no_data')}
+          hasPrices={hasPrices}
+        />
+      </section>
+
       <Panel
-        title={t('monitoring.account_overview_title')}
-        subtitle={t('monitoring.account_overview_desc')}
+        title={t('monitoring.multidimensional_summary_title')}
+        subtitle={t('monitoring.multidimensional_summary_desc')}
         className={styles.accountPanel}
         extra={
           <div className={styles.accountPanelActions}>
@@ -1491,7 +1686,9 @@ export function MonitoringCenterPage() {
               value={accountGroupBy}
               options={accountGroupOptions}
               onChange={(value) => {
-                setAccountGroupBy(value as MonitoringAccountGroupBy);
+                const nextGroupBy = value as MonitoringAccountGroupBy;
+                setAccountGroupBy(nextGroupBy);
+                setAccountSort(getDefaultAccountSort(nextGroupBy));
                 setExpandedAccounts({});
                 clearFocusScope();
               }}
@@ -1614,9 +1811,39 @@ export function MonitoringCenterPage() {
         </div>
       </Panel>
 
+      {focusScope ? (
+        <Card className={styles.focusPanel}>
+          <div className={styles.focusHeader}>
+            <span className={styles.focusKicker}>{t('monitoring.current_focus_title')}</span>
+            <strong>{`${t('monitoring.focused_scope_label')}: ${focusLabel}`}</strong>
+          </div>
+          <div className={styles.focusMetrics}>
+            <div>
+              <span>{t('monitoring.total_calls')}</span>
+              <strong>{formatCompactNumber(scopedSummary.totalCalls)}</strong>
+            </div>
+            <div>
+              <span>{t('monitoring.call_success_rate')}</span>
+              <strong>{formatPercent(scopedSummary.successRate)}</strong>
+            </div>
+            <div>
+              <span>{t('monitoring.estimated_cost')}</span>
+              <strong>{hasPrices ? formatUsd(scopedSummary.totalCost) : '--'}</strong>
+            </div>
+            <div>
+              <span>{t('monitoring.avg_latency')}</span>
+              <strong>{formatDurationMs(scopedSummary.averageLatencyMs, { locale: i18n.language })}</strong>
+            </div>
+          </div>
+          <button type="button" className={styles.inlineActionButton} onClick={clearFocusScope}>
+            {t('monitoring.clear_focus')}
+          </button>
+        </Card>
+      ) : null}
+
       <Panel
-        title={t('monitoring.realtime_table_title')}
-        subtitle={t('monitoring.realtime_table_desc')}
+        title={t('monitoring.analysis_view_title')}
+        subtitle={t('monitoring.analysis_view_desc')}
         className={styles.realtimePanel}
         extra={
           <div className={styles.inlineMetrics}>
@@ -1625,8 +1852,76 @@ export function MonitoringCenterPage() {
           </div>
         }
       >
-        <div className={`${styles.tableWrapper} ${styles.tableScrollWrapper} ${styles.realtimeTableWrapper}`}>
-          <table className={`${styles.table} ${styles.realtimeTable}`}>
+        <div className={styles.analysisTabs} role="tablist" aria-label={t('monitoring.analysis_view_title')}>
+          {ANALYSIS_TAB_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="tab"
+              aria-selected={activeAnalysisTab === option.value}
+              className={`${styles.analysisTabButton} ${activeAnalysisTab === option.value ? styles.analysisTabButtonActive : ''}`}
+              onClick={() => setActiveAnalysisTab(option.value)}
+            >
+              {t(option.labelKey)}
+            </button>
+          ))}
+        </div>
+
+        {activeAnalysisTab === 'trend' ? (
+          <div className={styles.trendGrid}>
+            {trendPoints.map((point) => (
+              <div key={point.key} className={styles.trendItem}>
+                <span className={styles.trendBarTrack}>
+                  <span
+                    className={styles.trendBarFill}
+                    style={{ '--trend-height': `${Math.max((point.requests / maxTrendRequests) * 100, 4)}%` } as CSSProperties}
+                  />
+                </span>
+                <strong>{formatCompactNumber(point.requests)}</strong>
+                <span>{point.label}</span>
+              </div>
+            ))}
+            {trendPoints.length === 0 ? <div className={styles.emptyBlockSmall}>{t('monitoring.no_data')}</div> : null}
+          </div>
+        ) : null}
+
+        {activeAnalysisTab === 'failures' ? (
+          <div className={styles.analysisList}>
+            {failureAnalysisRows.map((row) => (
+              <div key={row.key} className={styles.analysisRow}>
+                <div className={styles.primaryCell}>
+                  <span className={styles.monoCell}>{row.label}</span>
+                  <small>{row.meta || '-'}</small>
+                </div>
+                <div className={styles.inlineMetrics}>
+                  <span>{`${t('monitoring.column_failures')}: ${formatCompactNumber(row.failures)}`}</span>
+                  <span>{`${t('monitoring.column_failure_rate')}: ${formatPercent(row.failureRate)}`}</span>
+                  <span>{new Date(row.lastSeenAt).toLocaleString(i18n.language)}</span>
+                </div>
+              </div>
+            ))}
+            {failureAnalysisRows.length === 0 ? <div className={styles.emptyBlockSmall}>{t('monitoring.no_failures')}</div> : null}
+          </div>
+        ) : null}
+
+        {activeAnalysisTab === 'cost' ? (
+          <div className={styles.analysisList}>
+            {costRankingRows.map((row) => (
+              <div key={row.id} className={styles.analysisRow}>
+                <div className={styles.primaryCell}>
+                  <span className={styles.monoCell}>{row.account}</span>
+                  <small>{`${formatCompactNumber(row.totalTokens)} ${t('monitoring.column_tokens')} · ${formatPercent(row.successRate)}`}</small>
+                </div>
+                <strong>{hasPrices ? formatUsd(row.totalCost) : '--'}</strong>
+              </div>
+            ))}
+            {costRankingRows.length === 0 ? <div className={styles.emptyBlockSmall}>{t('monitoring.no_data')}</div> : null}
+          </div>
+        ) : null}
+
+        {activeAnalysisTab === 'logs' ? (
+          <div className={`${styles.tableWrapper} ${styles.tableScrollWrapper} ${styles.realtimeTableWrapper}`}>
+            <table className={`${styles.table} ${styles.realtimeTable}`}>
             <thead>
               <tr>
                 <th>{t('monitoring.column_type')}</th>
@@ -1720,9 +2015,9 @@ export function MonitoringCenterPage() {
               ) : null}
             </tbody>
           </table>
-        </div>
+          </div>
+        ) : null}
       </Panel>
-
       <Modal
         open={isPriceModalOpen}
         onClose={() => setIsPriceModalOpen(false)}
