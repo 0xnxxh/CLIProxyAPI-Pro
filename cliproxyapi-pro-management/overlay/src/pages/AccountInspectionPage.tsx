@@ -95,6 +95,7 @@ type InspectionSettingsDraft = {
   usedPercentThreshold: string;
   sampleSize: string;
   antigravityDeepProbeEnabled: boolean;
+  antigravityDeepProbeModel: string;
   autoExecuteQuotaLimitDisable: boolean;
   autoExecuteQuotaRecoveryEnable: boolean;
   autoExecuteAccountErrorAction: AccountInspectionAutoErrorAction;
@@ -382,12 +383,6 @@ const deepProbeLabelKey: Record<Exclude<NonNullable<AccountInspectionResultItem[
   skipped: 'monitoring.account_inspection_deep_probe_skipped',
 };
 
-const deepProbeToneClass = (status: AccountInspectionResultItem['deepProbeStatus']) => {
-  if (status === 'success') return styles.statePillGood;
-  if (status === 'quota' || status === 'auth_error' || status === 'transient_error') return styles.statePillBad;
-  return styles.statePillMuted;
-};
-
 const resolveResultHealthStatus = (item: AccountInspectionResultItem): ResultHealthStatus => {
   if (item.error) return 'inspectionError';
   if (item.action === 'delete' || (item.statusCode !== null && [400, 401, 403, 404].includes(item.statusCode))) {
@@ -589,6 +584,7 @@ const toSettingsDraft = (settings: AccountInspectionConfigurableSettings): Inspe
   usedPercentThreshold: String(settings.usedPercentThreshold),
   sampleSize: String(settings.sampleSize),
   antigravityDeepProbeEnabled: settings.antigravityDeepProbeEnabled,
+  antigravityDeepProbeModel: settings.antigravityDeepProbeModel,
   autoExecuteQuotaLimitDisable: settings.autoExecuteQuotaLimitDisable,
   autoExecuteQuotaRecoveryEnable: settings.autoExecuteQuotaRecoveryEnable,
   autoExecuteAccountErrorAction: settings.autoExecuteAccountErrorAction,
@@ -650,10 +646,10 @@ const formatTokenRefreshDetail = (
 };
 
 const tokenRefreshToneClass = (item: AccountInspectionResultItem) => {
-  if (item.tokenRefreshStatus === 'success') return styles.statePillGood;
-  if (item.tokenRefreshStatus === 'failed') return styles.statePillBad;
-  if (item.nextRefreshAt && item.nextRefreshAt > Date.now()) return styles.statePillWarn;
-  return styles.statePillMuted;
+  if (item.tokenRefreshStatus === 'success') return styles.stateTextGood;
+  if (item.tokenRefreshStatus === 'failed') return styles.stateTextBad;
+  if (item.nextRefreshAt && item.nextRefreshAt > Date.now()) return styles.stateTextWarn;
+  return styles.stateTextMuted;
 };
 
 const formatInspectionVerdictPrimary = (
@@ -891,6 +887,7 @@ const sameInspectionSettings = (left: AccountInspectionConfigurableSettings, rig
   left.usedPercentThreshold === right.usedPercentThreshold &&
   left.sampleSize === right.sampleSize &&
   left.antigravityDeepProbeEnabled === right.antigravityDeepProbeEnabled &&
+  left.antigravityDeepProbeModel === right.antigravityDeepProbeModel &&
   left.autoExecuteQuotaLimitDisable === right.autoExecuteQuotaLimitDisable &&
   left.autoExecuteQuotaRecoveryEnable === right.autoExecuteQuotaRecoveryEnable &&
   left.autoExecuteAccountErrorAction === right.autoExecuteAccountErrorAction;
@@ -904,6 +901,7 @@ const sameSettingsDraft = (left: InspectionSettingsDraft, right: InspectionSetti
   left.usedPercentThreshold === right.usedPercentThreshold &&
   left.sampleSize === right.sampleSize &&
   left.antigravityDeepProbeEnabled === right.antigravityDeepProbeEnabled &&
+  left.antigravityDeepProbeModel === right.antigravityDeepProbeModel &&
   left.autoExecuteQuotaLimitDisable === right.autoExecuteQuotaLimitDisable &&
   left.autoExecuteQuotaRecoveryEnable === right.autoExecuteQuotaRecoveryEnable &&
   left.autoExecuteAccountErrorAction === right.autoExecuteAccountErrorAction;
@@ -1866,6 +1864,7 @@ export function AccountInspectionPage() {
           return parsed;
         })(),
         antigravityDeepProbeEnabled: settingsDraft.antigravityDeepProbeEnabled,
+        antigravityDeepProbeModel: settingsDraft.antigravityDeepProbeModel,
         autoExecuteQuotaLimitDisable: settingsDraft.autoExecuteQuotaLimitDisable,
         autoExecuteQuotaRecoveryEnable: settingsDraft.autoExecuteQuotaRecoveryEnable,
         autoExecuteAccountErrorAction: settingsDraft.autoExecuteAccountErrorAction,
@@ -2234,7 +2233,7 @@ export function AccountInspectionPage() {
                         <tr key={item.key}>
                           <td><div className={styles.primaryCell}><span>{item.fileName}</span><small>{item.provider}</small></div></td>
                           <td><span className={`${styles.healthBadge} ${healthToneClass[healthStatus]}`}>{t(healthLabelKey[healthStatus])}</span></td>
-                          <td><span className={item.disabled ? `${styles.statePill} ${styles.statePillMuted}` : `${styles.statePill} ${styles.statePillGood}`}>{formatCurrentStateLabel(item, t)}</span></td>
+                          <td><span className={item.disabled ? styles.stateTextMuted : styles.stateTextGood}>{formatCurrentStateLabel(item, t)}</span></td>
                           <td>
                             <div className={styles.quotaCell}>
                               <span>{formatQuotaRemainingLabel(item.usedPercent)}</span>
@@ -2242,17 +2241,12 @@ export function AccountInspectionPage() {
                           </td>
                           <td>
                             <div className={styles.tokenRefreshCell}>
-                              <span className={`${styles.statePill} ${tokenRefreshToneClass(item)}`} title={tokenRefreshDetail || undefined}>{formatTokenRefreshLabel(item, t)}</span>
+                              <span className={tokenRefreshToneClass(item)} title={tokenRefreshDetail || undefined}>{formatTokenRefreshLabel(item, t)}</span>
                             </div>
                           </td>
                           <td>
                             <div className={styles.verdictCell}>
                               <strong>{formatInspectionVerdictPrimary(item, healthStatus, t)}</strong>
-                              {shouldShowDeepProbeBadge(item) ? (
-                                <small className={`${styles.statePill} ${deepProbeToneClass(item.deepProbeStatus)}`} title={item.deepProbeError || undefined}>
-                                  {formatDeepProbeLabel(item, t)}
-                                </small>
-                              ) : null}
                               <span>{formatInspectionVerdictSecondary(item, t)}</span>
                             </div>
                           </td>
@@ -2505,6 +2499,12 @@ export function AccountInspectionPage() {
               <span className={styles.settingsHint}>
                 {t('monitoring.account_inspection_settings_antigravity_deep_probe_hint', { defaultValue: '当 Antigravity 配额显示可用时，额外发送一次最小真实请求验证账号是否可用。会增加少量请求成本和巡检耗时。' })}
               </span>
+              <Input
+                label={t('monitoring.account_inspection_settings_antigravity_deep_probe_model_label', { defaultValue: 'Deep Probe Model' })}
+                hint={t('monitoring.account_inspection_settings_antigravity_deep_probe_model_hint', { defaultValue: 'Model used for Antigravity generateContent deep probe.' })}
+                value={settingsDraft.antigravityDeepProbeModel}
+                onChange={(event) => handleSettingsDraftChange('antigravityDeepProbeModel', event.target.value)}
+              />
             </div>
           </div>
         </section>

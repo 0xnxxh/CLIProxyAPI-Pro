@@ -30,6 +30,7 @@ export interface AccountInspectionConfigurableSettings {
   usedPercentThreshold: number;
   sampleSize: number;
   antigravityDeepProbeEnabled: boolean;
+  antigravityDeepProbeModel: string;
   autoExecuteQuotaLimitDisable: boolean;
   autoExecuteQuotaRecoveryEnable: boolean;
   autoExecuteAccountErrorAction: AccountInspectionAutoErrorAction;
@@ -219,6 +220,7 @@ export const DEFAULT_ACCOUNT_INSPECTION_SETTINGS: AccountInspectionConfigurableS
   usedPercentThreshold: 100,
   sampleSize: 0,
   antigravityDeepProbeEnabled: false,
+  antigravityDeepProbeModel: 'claude-sonnet-4-6',
   autoExecuteQuotaLimitDisable: false,
   autoExecuteQuotaRecoveryEnable: false,
   autoExecuteAccountErrorAction: 'none',
@@ -319,6 +321,7 @@ const readConfigurableSettingsFromConfig = (
     autoExecuteQuotaRecoveryEnable: undefined,
     autoExecuteAccountErrorAction: undefined,
     antigravityDeepProbeEnabled: undefined,
+    antigravityDeepProbeModel: undefined,
   };
 };
 
@@ -379,6 +382,8 @@ const normalizeConfigurableSettings = (
       merged.antigravityDeepProbeEnabled,
       DEFAULT_ACCOUNT_INSPECTION_SETTINGS.antigravityDeepProbeEnabled
     ),
+    antigravityDeepProbeModel: readStringValue(merged.antigravityDeepProbeModel) ||
+      DEFAULT_ACCOUNT_INSPECTION_SETTINGS.antigravityDeepProbeModel,
     autoExecuteAccountErrorAction: normalizeAutoErrorAction(merged.autoExecuteAccountErrorAction),
   };
 };

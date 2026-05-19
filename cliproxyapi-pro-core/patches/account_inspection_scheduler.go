@@ -70,6 +70,7 @@ type accountInspectionSettings struct {
 	UsedPercentThreshold           int                     `json:"usedPercentThreshold"`
 	SampleSize                     int                     `json:"sampleSize"`
 	AntigravityDeepProbeEnabled    bool                    `json:"antigravityDeepProbeEnabled"`
+	AntigravityDeepProbeModel      string                  `json:"antigravityDeepProbeModel"`
 	AutoExecuteQuotaLimitDisable   bool                    `json:"autoExecuteQuotaLimitDisable"`
 	AutoExecuteQuotaRecoveryEnable bool                    `json:"autoExecuteQuotaRecoveryEnable"`
 	AutoExecuteAccountErrorAction  accountInspectionAction `json:"autoExecuteAccountErrorAction"`
@@ -337,6 +338,7 @@ func defaultAccountInspectionSettings() accountInspectionSettings {
 		UsedPercentThreshold:           100,
 		SampleSize:                     0,
 		AntigravityDeepProbeEnabled:    false,
+		AntigravityDeepProbeModel:      "claude-sonnet-4-6",
 		AutoExecuteQuotaLimitDisable:   false,
 		AutoExecuteQuotaRecoveryEnable: false,
 		AutoExecuteAccountErrorAction:  accountInspectionActionNone,
@@ -388,6 +390,10 @@ func normalizeAccountInspectionSchedule(input accountInspectionSchedule) account
 	}
 	if settings.SampleSize < 0 {
 		settings.SampleSize = 0
+	}
+	settings.AntigravityDeepProbeModel = strings.TrimSpace(settings.AntigravityDeepProbeModel)
+	if settings.AntigravityDeepProbeModel == "" {
+		settings.AntigravityDeepProbeModel = defaults.AntigravityDeepProbeModel
 	}
 	settings.AutoExecuteAccountErrorAction = accountInspectionAction(strings.ToLower(strings.TrimSpace(string(settings.AutoExecuteAccountErrorAction))))
 	if settings.AutoExecuteAccountErrorAction != accountInspectionActionDisable && settings.AutoExecuteAccountErrorAction != accountInspectionActionDelete {
@@ -1510,7 +1516,7 @@ func antigravityShouldDeepProbe(decision accountInspectionDecision) bool {
 }
 
 func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, groups []map[string]any, decision accountInspectionDecision, quotaStatus *int, appendLog func(string, string)) (accountInspectionDecision, *int, error) {
-	model := selectAntigravityDeepProbeModel(groups)
+	model := selectAntigravityDeepProbeModel(groups, settings.AntigravityDeepProbeModel)
 	projectID := antigravityProjectID(account.Auth)
 	if model == "" || projectID == "" {
 		decision.DeepProbeStatus = accountInspectionDeepProbeSkipped
@@ -1585,7 +1591,10 @@ func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Conte
 	return decision, firstStatus(lastStatus, quotaStatus), nil
 }
 
-func selectAntigravityDeepProbeModel(groups []map[string]any) string {
+func selectAntigravityDeepProbeModel(groups []map[string]any, preferredModel string) string {
+	if model := strings.TrimSpace(preferredModel); model != "" {
+		return model
+	}
 	priority := []string{"claude-sonnet-4-6", "gpt-oss-120b-medium", "claude-opus-4-6-thinking"}
 	available := make(map[string]struct{})
 	for _, group := range groups {
@@ -1600,6 +1609,9 @@ func selectAntigravityDeepProbeModel(groups []map[string]any) string {
 		}
 	}
 	for _, model := range priority {
+		if model == "" {
+			continue
+		}
 		if _, ok := available[model]; ok {
 			return model
 		}
@@ -2195,6 +2207,12 @@ func (s *accountInspectionScheduler) applyAutomaticActions(ctx context.Context, 
 		} else {
 			results[index].Executed = true
 			results[index].Action = action
+			if action == accountInspectionActionDisable {
+				results[index].Disabled = true
+			}
+			if action == accountInspectionActionEnable {
+				results[index].Disabled = false
+			}
 			appendLog("success", fmt.Sprintf("%s %s 成功", resultIdentity(results[index]), action))
 		}
 		mu.Unlock()

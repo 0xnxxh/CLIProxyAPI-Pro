@@ -2129,7 +2129,7 @@
 }
 
 .table {
-  min-width: 0;
+  min-width: 980px;
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
@@ -2267,6 +2267,34 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.stateText,
+.stateTextGood,
+.stateTextMuted,
+.stateTextWarn,
+.stateTextBad {
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.stateText,
+.stateTextGood {
+  color: var(--inspect-green);
+}
+
+.stateTextMuted {
+  color: var(--inspect-muted);
+}
+
+.stateTextWarn {
+  color: var(--inspect-amber);
+}
+
+.stateTextBad {
+  color: var(--inspect-red);
 }
 
 .statePill {
