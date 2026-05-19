@@ -428,7 +428,8 @@ const emptyProviderAccountStats = (provider: string): ProviderAccountStats => ({
 
 const buildAuthFileAccountStats = (
   files: AuthFileItem[],
-  quotaStore: QuotaAccountStatsState
+  quotaStore: QuotaAccountStatsState,
+  usedPercentThreshold: number
 ): AuthFileAccountStats => {
   const providerStats = new Map<string, ProviderAccountStats>();
   const stats: AuthFileAccountStats = {
@@ -442,16 +443,15 @@ const buildAuthFileAccountStats = (
     providers: [],
   };
 
+  const quotaMaps = Object.values(quotaStore);
+
   files.forEach((file) => {
     const provider = resolveAuthProvider(file) || 'unknown';
     const disabled = isDisabledAuthFile(file);
     const abnormal = isAuthFileAbnormal(file);
-    const quotaLow =
-      isQuotaLowState(quotaStore.antigravityQuota[file.name]) ||
-      isQuotaLowState(quotaStore.claudeQuota[file.name]) ||
-      isQuotaLowState(quotaStore.codexQuota[file.name]) ||
-      isQuotaLowState(quotaStore.geminiCliQuota[file.name]) ||
-      isQuotaLowState(quotaStore.kimiQuota[file.name]);
+    const quotaLow = quotaMaps.some((providerQuota) =>
+      isQuotaLowState(providerQuota[file.name], usedPercentThreshold)
+    );
 
     if (disabled) {
       stats.disabled += 1;
@@ -563,8 +563,6 @@ const formatInspectionInterval = (minutes: number, locale: string) =>
 
 const DONUT_COLORS = ['#2563eb', '#22c55e', '#f97316', '#8b5cf6', '#06b6d4', '#ec4899'];
 
-const formatPercent = (value: number | null) => (value === null ? '--' : `${value.toFixed(1)}%`);
-
 const toSettingsDraft = (settings: AccountInspectionConfigurableSettings): InspectionSettingsDraft => ({
   targetType: settings.targetType,
   workers: String(settings.workers),
@@ -612,7 +610,7 @@ const formatTokenRefreshDetail = (
   locale: string,
   t: ReturnType<typeof useTranslation>['t']
 ) => {
-  if (item.tokenRefreshError) return item.tokenRefreshError;
+  if (item.tokenRefreshStatus === 'failed') return item.tokenRefreshError || '';
   if (item.nextRefreshAt && item.nextRefreshAt > 0) {
     return t('monitoring.account_inspection_token_next_refresh_at', {
       defaultValue: 'Next {{time}}',
@@ -1554,8 +1552,8 @@ export function AccountInspectionPage() {
   );
 
   const authFileStats = useMemo(
-    () => buildAuthFileAccountStats(authFiles, quotaStore),
-    [authFiles, quotaStore]
+    () => buildAuthFileAccountStats(authFiles, quotaStore, inspectionSettings.usedPercentThreshold),
+    [authFiles, inspectionSettings.usedPercentThreshold, quotaStore]
   );
 
   useEffect(() => {
@@ -1651,13 +1649,15 @@ export function AccountInspectionPage() {
   const scheduleStatusLabel = schedule?.enabled
     ? formatInspectionInterval(schedule.intervalMinutes, i18n.language)
     : settingDisabledLabel;
-  const autoExecutionResultLabel = actionStats.autoTotal > 0
-    ? [
-        `${t('monitoring.account_inspection_action_enable')}: ${actionStats.autoEnable}`,
-        `${t('monitoring.account_inspection_action_disable')}: ${actionStats.autoDisable}`,
-        `${t('monitoring.account_inspection_action_delete')}: ${actionStats.autoDelete}`,
-      ].join(' · ')
-    : t('monitoring.account_inspection_auto_execute_no_actions');
+  const autoExecutionResultLabel = !result
+    ? t('monitoring.account_inspection_auto_execute_pending', { defaultValue: 'Automatic policy results will appear after the first inspection.' })
+    : actionStats.autoTotal > 0
+      ? [
+          `${t('monitoring.account_inspection_action_enable')}: ${actionStats.autoEnable}`,
+          `${t('monitoring.account_inspection_action_disable')}: ${actionStats.autoDisable}`,
+          `${t('monitoring.account_inspection_action_delete')}: ${actionStats.autoDelete}`,
+        ].join(' · ')
+      : t('monitoring.account_inspection_auto_execute_no_actions');
   const showInspectionResults = useCallback((filter: ResultFilter) => {
     setResultFilter(filter);
     requestAnimationFrame(() => resultsPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
@@ -1952,12 +1952,14 @@ export function AccountInspectionPage() {
             <h2>{t('monitoring.account_inspection_control_title')}</h2>
             <p>{t('monitoring.account_inspection_control_desc')}</p>
           </div>
-          {result ? (
-            <div className={styles.cockpitStatusPills}>
-              <span>{`${t('monitoring.last_sync')}: ${formatTimestamp(result.finishedAt, i18n.language)}`}</span>
-              <span>{`${t('monitoring.account_inspection_pending_actions')}: ${pendingActionCount}`}</span>
-            </div>
-          ) : null}
+          <button
+            type="button"
+            className={styles.foldButton}
+            onClick={openSettingsModal}
+            disabled={(runStatus === 'running' || runStatus === 'paused') || executing}
+          >
+            {t('monitoring.account_inspection_settings_button')}
+          </button>
         </div>
         <div className={styles.inspectionOperationGrid}>
           <div className={styles.operationMainColumn}>
@@ -1972,14 +1974,6 @@ export function AccountInspectionPage() {
                     <span>{progress.percent >= 100 ? t('monitoring.account_inspection_phase_completed', { defaultValue: 'Inspection completed' }) : progressLabel}</span>
                     <small>{`${t('monitoring.last_sync')}: ${result?.finishedAt ? formatTimestamp(result.finishedAt, i18n.language) : '--'}`}</small>
                   </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={openSettingsModal}
-                    disabled={(runStatus === 'running' || runStatus === 'paused') || executing}
-                  >
-                    {t('monitoring.account_inspection_settings_button')}
-                  </Button>
                 </div>
                 <div className={styles.inspectionConfigGrid}>
                   <span>
@@ -2066,19 +2060,29 @@ export function AccountInspectionPage() {
               <div className={styles.strategyResultSection}>
                 <div className={styles.strategySectionHeader}>
                   <h3>{t('monitoring.account_inspection_auto_execution_breakdown', { defaultValue: 'Automatic policy execution' })}</h3>
-                  <button type="button" onClick={() => showInspectionResults('inspectionError')}>{t('monitoring.account_inspection_view_results', { defaultValue: 'View Results' })}</button>
+                  {result ? <button type="button" onClick={() => showInspectionResults('inspectionError')}>{t('monitoring.account_inspection_view_results', { defaultValue: 'View Results' })}</button> : null}
                 </div>
-                <div className={styles.strategyTotalsRow}>
-                  <span>{`${t('monitoring.account_inspection_action_enable')} ${actionStats.autoEnable}`}</span>
-                  <span>{`${t('monitoring.account_inspection_action_disable')} ${actionStats.autoDisable}`}</span>
-                  <span>{`${t('monitoring.account_inspection_action_delete')} ${actionStats.autoDelete}`}</span>
-                  <span>{`${t('monitoring.account_inspection_action_keep')} ${actionStats.keep}`}</span>
-                </div>
-                <div className={styles.strategyActivityRow}>
-                  <span className={styles.strategyActivityIcon} aria-hidden="true" />
-                  <span>{result?.finishedAt ? formatTimestamp(result.finishedAt, i18n.language) : '--'}</span>
-                  <strong>{autoExecutionResultLabel}</strong>
-                </div>
+                {result ? (
+                  <>
+                    <div className={styles.strategyTotalsRow}>
+                      <span>{`${t('monitoring.account_inspection_action_enable')} ${actionStats.autoEnable}`}</span>
+                      <span>{`${t('monitoring.account_inspection_action_disable')} ${actionStats.autoDisable}`}</span>
+                      <span>{`${t('monitoring.account_inspection_action_delete')} ${actionStats.autoDelete}`}</span>
+                      <span>{`${t('monitoring.account_inspection_action_keep')} ${actionStats.keep}`}</span>
+                    </div>
+                    <div className={styles.strategyActivityRow}>
+                      <span className={styles.strategyActivityIcon} aria-hidden="true" />
+                      <span>{formatTimestamp(result.finishedAt, i18n.language)}</span>
+                      <strong>{autoExecutionResultLabel}</strong>
+                    </div>
+                  </>
+                ) : (
+                  <div className={styles.manualPendingEmpty}>
+                    <span aria-hidden="true">•</span>
+                    <strong>{t('monitoring.account_inspection_auto_execution_waiting_title', { defaultValue: 'Waiting for inspection result' })}</strong>
+                    <small>{autoExecutionResultLabel}</small>
+                  </div>
+                )}
               </div>
             ) : (
               <div className={styles.manualPendingSection}>
@@ -2138,45 +2142,6 @@ export function AccountInspectionPage() {
 
         {result ? (
           <>
-            <div className={styles.resultCards}>
-              {filteredResults.length > 0 ? filteredResults.map((item) => {
-                const healthStatus = resolveResultHealthStatus(item);
-                const manualActions = getManualActions(item);
-                return (
-                  <article key={item.key} className={styles.resultCard}>
-                    <div className={styles.resultCardHeader}>
-                      <div className={styles.primaryCell}>
-                        <span>{item.fileName}</span>
-                        <small>{item.provider}</small>
-                      </div>
-                      <span className={`${styles.healthBadge} ${healthToneClass[healthStatus]}`}>{t(healthLabelKey[healthStatus])}</span>
-                    </div>
-                    <div className={styles.resultCardGrid}>
-                      <span>{t('monitoring.account_inspection_current_state')}</span><strong>{formatCurrentStateLabel(item, t)}</strong>
-                      <span>{t('monitoring.account_inspection_http_status')}</span><strong>{item.statusCode === null ? '--' : item.statusCode}</strong>
-                      <span>{t('monitoring.account_inspection_used_percent')}</span><strong>{formatPercent(item.usedPercent)}</strong>
-                      <span>{t('monitoring.account_inspection_next_action')}</span><strong>{formatActionLabel(item.action, t)}</strong>
-                    </div>
-                    <p>{formatInspectionVerdictPrimary(item, healthStatus, t)}</p>
-                    {item.error ? <p className={styles.errorText}>{item.error}</p> : null}
-                    <div className={styles.operationActions}>
-                      <Button size="sm" variant="secondary" onClick={() => void handleRefreshTokenSingle(item)} loading={refreshingTokenKey === item.key} disabled={runStatus === 'running' || executing || recheckingKey !== null || refreshingTokenKey !== null}>
-                        {t('monitoring.account_inspection_refresh_token_action', { defaultValue: 'Refresh' })}
-                      </Button>
-                      <Button size="sm" variant="secondary" onClick={() => void handleRecheckSingle(item)} loading={recheckingKey === item.key} disabled={runStatus === 'running' || executing || recheckingKey !== null || refreshingTokenKey !== null}>
-                        {t('monitoring.account_inspection_recheck_account', { defaultValue: 'Recheck' })}
-                      </Button>
-                      {manualActions.length > 0 ? manualActions.map((action) => (
-                        <Button key={action} size="sm" variant={action === 'delete' ? 'danger' : 'secondary'} onClick={() => handleExecuteSingle(item, action)} disabled={runStatus === 'running' || executing || recheckingKey !== null || refreshingTokenKey !== null}>
-                          {formatActionLabel(action, t)}
-                        </Button>
-                      )) : null}
-                    </div>
-                  </article>
-                );
-              }) : <div className={styles.emptyBlockSmall}>{t('monitoring.account_inspection_no_filtered_results')}</div>}
-            </div>
-
             <div className={styles.tableWrap}>
               <table className={styles.table}>
                 <colgroup>
@@ -2204,6 +2169,7 @@ export function AccountInspectionPage() {
                     filteredResults.map((item) => {
                       const healthStatus = resolveResultHealthStatus(item);
                       const manualActions = getManualActions(item);
+                      const tokenRefreshDetail = formatTokenRefreshDetail(item, i18n.language, t);
                       return (
                         <tr key={item.key}>
                           <td><div className={styles.primaryCell}><span>{item.fileName}</span><small>{item.provider}</small></div></td>
@@ -2216,8 +2182,7 @@ export function AccountInspectionPage() {
                           </td>
                           <td>
                             <div className={styles.tokenRefreshCell}>
-                              <span className={`${styles.statePill} ${tokenRefreshToneClass(item)}`}>{formatTokenRefreshLabel(item, t)}</span>
-                              {formatTokenRefreshDetail(item, i18n.language, t) ? <small>{formatTokenRefreshDetail(item, i18n.language, t)}</small> : null}
+                              <span className={`${styles.statePill} ${tokenRefreshToneClass(item)}`} title={tokenRefreshDetail || undefined}>{formatTokenRefreshLabel(item, t)}</span>
                             </div>
                           </td>
                           <td>
@@ -2228,7 +2193,14 @@ export function AccountInspectionPage() {
                           </td>
                           <td className={styles.operationCell}>
                             <div className={styles.operationActions}>
-                              <Button size="sm" variant="secondary" onClick={() => void handleRefreshTokenSingle(item)} loading={refreshingTokenKey === item.key} disabled={runStatus === 'running' || executing || recheckingKey !== null || refreshingTokenKey !== null}>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => void handleRefreshTokenSingle(item)}
+                                loading={refreshingTokenKey === item.key}
+                                disabled={runStatus === 'running' || executing || recheckingKey !== null || refreshingTokenKey !== null}
+                                title={t('monitoring.account_inspection_refresh_token_tooltip', { defaultValue: 'Refresh token' })}
+                              >
                                 {t('monitoring.account_inspection_refresh_token_action', { defaultValue: 'Refresh' })}
                               </Button>
                               <Button size="sm" variant="secondary" onClick={() => void handleRecheckSingle(item)} loading={recheckingKey === item.key} disabled={runStatus === 'running' || executing || recheckingKey !== null || refreshingTokenKey !== null}>
@@ -2254,10 +2226,7 @@ export function AccountInspectionPage() {
         ) : (
           <div className={styles.emptyState}>
             <strong>{resultEmptyMessage}</strong>
-            <span>{connectionStatus === 'connected' ? t('monitoring.account_inspection_empty_hint', { defaultValue: 'Start an inspection to generate account health and suggested actions.' }) : t('notification.connection_required')}</span>
-            <Button variant="primary" onClick={handleRunInspection} disabled={connectionStatus !== 'connected'}>
-              {t('monitoring.account_inspection_run')}
-            </Button>
+            <span>{connectionStatus === 'connected' ? t('monitoring.account_inspection_empty_hint', { defaultValue: 'Use Inspection Control to generate account health and suggested actions.' }) : t('notification.connection_required')}</span>
           </div>
         )}
         </Card>

@@ -4,7 +4,6 @@ import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
-import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { Modal } from '@/components/ui/Modal';
 import { Select } from '@/components/ui/Select';
 import {
@@ -2221,28 +2220,33 @@ function AccountStatsPanel({
               })}
             </div>
             {totalPages > 1 && (
-              <div className={styles.accountCardPagination}>
-                <button
-                  type="button"
-                  className={styles.accountCardPageButton}
+              <div className={quotaStyles.pagination}>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   disabled={safePageIndex === 0}
                   onClick={() => setCardPage((p) => Math.max(0, p - 1))}
                   aria-label={t('monitoring.previous_page')}
                 >
-                  ‹
-                </button>
-                <span className={styles.accountCardPageInfo}>
-                  {safePageIndex + 1} / {totalPages}
-                </span>
-                <button
-                  type="button"
-                  className={styles.accountCardPageButton}
+                  {t('auth_files.pagination_prev', { defaultValue: t('monitoring.previous_page') })}
+                </Button>
+                <div className={quotaStyles.pageInfo}>
+                  {t('auth_files.pagination_info', {
+                    current: safePageIndex + 1,
+                    total: totalPages,
+                    count: filteredRows.length,
+                    defaultValue: `${safePageIndex + 1} / ${totalPages} · ${filteredRows.length}`,
+                  })}
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   disabled={safePageIndex >= totalPages - 1}
                   onClick={() => setCardPage((p) => Math.min(totalPages - 1, p + 1))}
                   aria-label={t('monitoring.next_page')}
                 >
-                  ›
-                </button>
+                  {t('auth_files.pagination_next', { defaultValue: t('monitoring.next_page') })}
+                </Button>
               </div>
             )}
           </>
@@ -2325,7 +2329,6 @@ export function MonitoringCenterPage() {
 
   const {
     usage,
-    loading: usageLoading,
     error: usageError,
     modelPrices,
     setModelPrices,
@@ -2333,7 +2336,6 @@ export function MonitoringCenterPage() {
   } = useUsageData();
 
   const {
-    loading: monitoringLoading,
     error: monitoringError,
     authFiles,
     allRows,
@@ -2421,7 +2423,6 @@ export function MonitoringCenterPage() {
 
   useHeaderRefresh(refreshAll);
 
-  const overallLoading = usageLoading || monitoringLoading;
   const combinedError = [usageError, monitoringError].filter(Boolean).join('；');
   const hasPrices = Object.keys(modelPrices).length > 0;
 
@@ -2815,15 +2816,6 @@ export function MonitoringCenterPage() {
 
   return (
     <div className={styles.page}>
-      {overallLoading && !usage ? (
-        <div className={styles.loadingOverlay} aria-busy="true">
-          <div className={styles.loadingOverlayContent}>
-            <LoadingSpinner size={28} />
-            <span>{t('common.loading')}</span>
-          </div>
-        </div>
-      ) : null}
-
       <section className={styles.masthead}>
         <div className={styles.mastheadGlow} aria-hidden="true" />
 

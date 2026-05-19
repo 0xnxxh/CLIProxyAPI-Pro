@@ -476,7 +476,7 @@
       "account_inspection_auto_policy_off": "Automatic execution is off",
       "account_inspection_results_generating": "Inspection is running. Results will appear as soon as the backend publishes a snapshot.",
       "account_inspection_results_error_empty": "Unable to complete the inspection. Check logs and retry.",
-      "account_inspection_empty_hint": "Start an inspection to generate account health and suggested actions.",
+      "account_inspection_empty_hint": "Use Inspection Control to generate account health, quota status, and suggested actions.",
       "account_inspection_risk_overview_title": "Risk Overview",
       "account_inspection_risk_overview_desc": "Key account risk, pending actions, and the latest inspection state.",
       "account_inspection_all_accounts": "All",
@@ -551,6 +551,7 @@
       "account_inspection_recheck_started": "Rechecking {{account}}",
       "account_inspection_recheck_success": "Recheck completed for {{account}}",
       "account_inspection_refresh_token_action": "Token",
+      "account_inspection_refresh_token_tooltip": "Refresh token",
       "account_inspection_refresh_token_started": "Refreshing token for {{account}}",
       "account_inspection_refresh_token_success": "Token refreshed",
       "account_inspection_refresh_token_confirm_title": "Refresh Token",
@@ -558,7 +559,9 @@
       "account_inspection_refresh_token_confirm_hint": "Only token refresh state and next refresh time will be updated.",
       "account_inspection_delete_single_title": "Delete Account",
       "account_inspection_delete_single_confirm_body": "Delete {{account}} from auth files. This cannot be restored from this page.",
-      "account_inspection_delete_single_warning": "Confirm the auth file is backed up before deleting."
+      "account_inspection_delete_single_warning": "Confirm the auth file is backed up before deleting.",
+      "account_inspection_auto_execute_pending": "Automatic policy results will appear here after the first inspection.",
+      "account_inspection_auto_execution_waiting_title": "Waiting for inspection result"
     },
     "usage_stats": {
       "title": "Usage Statistics",
@@ -1144,7 +1147,7 @@
       "account_inspection_auto_policy_off": "Автоматическое выполнение отключено",
       "account_inspection_results_generating": "Проверка выполняется. Результаты появятся после публикации снимка сервером.",
       "account_inspection_results_error_empty": "Не удалось завершить проверку. Проверьте журнал и повторите попытку.",
-      "account_inspection_empty_hint": "Запустите проверку, чтобы получить состояние аккаунтов и рекомендуемые действия.",
+      "account_inspection_empty_hint": "Запустите проверку в блоке управления, чтобы получить состояние аккаунтов, квоты и рекомендуемые действия.",
       "account_inspection_risk_overview_title": "Обзор рисков",
       "account_inspection_risk_overview_desc": "Ключевые риски аккаунтов, ожидающие действия и последнее состояние проверки.",
       "account_inspection_all_accounts": "Все",
@@ -1219,6 +1222,7 @@
       "account_inspection_recheck_started": "Повторная проверка {{account}}",
       "account_inspection_recheck_success": "Повторная проверка {{account}} завершена",
       "account_inspection_refresh_token_action": "Токен",
+      "account_inspection_refresh_token_tooltip": "Обновить токен",
       "account_inspection_refresh_token_started": "Обновляю токен для {{account}}",
       "account_inspection_refresh_token_success": "Токен обновлён",
       "account_inspection_refresh_token_confirm_title": "Обновить токен",
@@ -1226,7 +1230,9 @@
       "account_inspection_refresh_token_confirm_hint": "Будут обновлены только статус обновления токена и время следующего обновления.",
       "account_inspection_delete_single_title": "Удалить аккаунт",
       "account_inspection_delete_single_confirm_body": "Удалить {{account}} из auth-файлов. На этой странице это действие нельзя отменить.",
-      "account_inspection_delete_single_warning": "Перед удалением убедитесь, что auth-файл сохранён в резервной копии."
+      "account_inspection_delete_single_warning": "Перед удалением убедитесь, что auth-файл сохранён в резервной копии.",
+      "account_inspection_auto_execute_pending": "Результаты автоматической политики появятся здесь после первой проверки.",
+      "account_inspection_auto_execution_waiting_title": "Ожидание результата проверки"
     },
     "usage_stats": {
       "title": "Статистика использования",
@@ -1812,7 +1818,7 @@
       "account_inspection_auto_policy_off": "自动执行已关闭",
       "account_inspection_results_generating": "巡检正在运行，后端发布快照后结果会自动显示。",
       "account_inspection_results_error_empty": "巡检未能完成。请查看日志后重试。",
-      "account_inspection_empty_hint": "开始巡检后将生成账号健康状态和建议动作。",
+      "account_inspection_empty_hint": "请在巡检控制模块发起巡检，生成账号健康、配额状态和建议动作。",
       "account_inspection_risk_overview_title": "风险总览",
       "account_inspection_risk_overview_desc": "汇总账号风险、待处理动作和最新巡检状态。",
       "account_inspection_all_accounts": "全部",
@@ -1887,6 +1893,7 @@
       "account_inspection_recheck_started": "正在重新检查 {{account}}",
       "account_inspection_recheck_success": "{{account}} 重检完成",
       "account_inspection_refresh_token_action": "刷新",
+      "account_inspection_refresh_token_tooltip": "刷新令牌",
       "account_inspection_refresh_token_started": "正在刷新 {{account}} 的令牌",
       "account_inspection_refresh_token_success": "令牌刷新完成",
       "account_inspection_refresh_token_confirm_title": "刷新令牌",
@@ -1894,7 +1901,9 @@
       "account_inspection_refresh_token_confirm_hint": "仅更新令牌刷新状态和下次刷新时间。",
       "account_inspection_delete_single_title": "删除账号",
       "account_inspection_delete_single_confirm_body": "将从认证文件中删除 {{account}}，此页面无法恢复。",
-      "account_inspection_delete_single_warning": "删除前请确认认证文件已备份。"
+      "account_inspection_delete_single_warning": "删除前请确认认证文件已备份。",
+      "account_inspection_auto_execute_pending": "首次巡检完成后，这里会展示自动策略的执行结果。",
+      "account_inspection_auto_execution_waiting_title": "等待巡检结果"
     },
     "usage_stats": {
       "title": "使用统计",
@@ -2474,7 +2483,7 @@
       "account_inspection_auto_policy_off": "自動執行已關閉",
       "account_inspection_results_generating": "巡檢正在執行，後端發布快照後結果會自動顯示。",
       "account_inspection_results_error_empty": "巡檢未能完成。請查看日誌後重試。",
-      "account_inspection_empty_hint": "開始巡檢後將產生帳號健康狀態和建議動作。",
+      "account_inspection_empty_hint": "請在巡檢控制模組發起巡檢，生成帳號健康、配額狀態和建議動作。",
       "account_inspection_risk_overview_title": "風險總覽",
       "account_inspection_risk_overview_desc": "彙總帳號風險、待處理動作和最新巡檢狀態。",
       "account_inspection_all_accounts": "全部",
@@ -2549,6 +2558,7 @@
       "account_inspection_recheck_started": "正在重新檢查 {{account}}",
       "account_inspection_recheck_success": "{{account}} 重檢完成",
       "account_inspection_refresh_token_action": "刷新",
+      "account_inspection_refresh_token_tooltip": "刷新令牌",
       "account_inspection_refresh_token_started": "正在刷新 {{account}} 的令牌",
       "account_inspection_refresh_token_success": "令牌刷新完成",
       "account_inspection_refresh_token_confirm_title": "刷新令牌",
@@ -2556,7 +2566,9 @@
       "account_inspection_refresh_token_confirm_hint": "僅更新令牌刷新狀態和下次刷新時間。",
       "account_inspection_delete_single_title": "刪除帳號",
       "account_inspection_delete_single_confirm_body": "將從認證檔案中刪除 {{account}}，此頁面無法恢復。",
-      "account_inspection_delete_single_warning": "刪除前請確認認證檔案已備份。"
+      "account_inspection_delete_single_warning": "刪除前請確認認證檔案已備份。",
+      "account_inspection_auto_execute_pending": "首次巡檢完成後，這裡會顯示自動策略的執行結果。",
+      "account_inspection_auto_execution_waiting_title": "等待巡檢結果"
     },
     "usage_stats": {
       "title": "使用統計",

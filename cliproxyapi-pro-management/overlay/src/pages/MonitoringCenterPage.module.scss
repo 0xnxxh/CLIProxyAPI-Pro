@@ -26,27 +26,6 @@
   min-width: 0;
 }
 
-.loadingOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: grid;
-  place-items: center;
-  background: color-mix(in srgb, var(--monitor-bg) 58%, transparent);
-  backdrop-filter: blur(10px);
-}
-
-.loadingOverlayContent {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 20px;
-  border-radius: 20px;
-  border: 1px solid var(--monitor-line);
-  background: var(--monitor-surface);
-  box-shadow: var(--shadow-lg);
-}
-
 .masthead,
 .panel {
   position: relative;
@@ -703,9 +682,9 @@
 
 .usageTrendHeader,
 .usageTrendCollapsed {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 18px;
   min-width: 0;
 }
@@ -734,7 +713,8 @@
 }
 
 .usageTrendActions {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -744,6 +724,8 @@
 
 .timeRangeControl,
 .usageTrendRangeControl {
+  display: flex;
+  flex-wrap: nowrap;
   max-width: 100%;
   overflow-x: auto;
   scrollbar-width: none;
@@ -1276,6 +1258,7 @@
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 18px;
+  min-width: 0;
 }
 
 .rankingHeader h3 {
@@ -1285,8 +1268,9 @@
   letter-spacing: -0.02em;
 }
 
-.rankingHeader > div:first-child {
-  min-width: 0;
+.rankingHeader > .rankingMetricSwitch {
+  flex-shrink: 0;
+  align-self: flex-start;
 }
 
 .rankingMetricSwitch {
@@ -1858,55 +1842,6 @@
   align-items: start;
   justify-content: start;
   gap: 16px;
-}
-
-.accountCardPagination {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-
-.accountCardPageButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 32px;
-  min-height: 32px;
-  padding: 0 8px;
-  border: 1px solid var(--monitor-line);
-  border-radius: 8px;
-  background: var(--monitor-surface);
-  color: var(--monitor-ink);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-  transition:
-    border-color 0.18s ease,
-    background-color 0.18s ease,
-    color 0.18s ease;
-}
-
-.accountCardPageButton:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--monitor-accent) 35%, var(--monitor-line-strong));
-  background: var(--monitor-surface-hover);
-}
-
-.accountCardPageButton:disabled {
-  cursor: not-allowed;
-  opacity: 0.38;
-}
-
-.accountCardPageInfo {
-  display: inline-flex;
-  align-items: center;
-  min-height: 32px;
-  padding: 0 10px;
-  color: var(--monitor-muted);
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
 }
 
 .accountOverviewCard {
@@ -3641,36 +3576,48 @@
 @container monitoring-page (max-width: 900px) {
   .usageTrendHeader,
   .usageTrendCollapsed {
-    display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: start;
     gap: 10px 12px;
   }
 
-  .usageTrendActions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-column: 1 / -1;
-    width: 100%;
-    align-items: center;
-    justify-content: stretch;
+  .usageTrendCopy {
+    display: contents;
   }
 
-  .mobileHeaderHideButton {
-    display: inline-flex;
+  .usageTrendCopy h2 {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: center;
+  }
+
+  .usageTrendHeader .usageTrendCopy p {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .usageTrendActions {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .usageTrendHeader > .usageTrendActions > .usageTrendHideButton {
     display: none;
   }
 
-  .usageTrendHeader .usageTrendCopy p {
-    grid-column: 1 / -1;
+  .mobileHeaderHideButton {
+    display: inline-flex;
+    grid-column: 2;
+    align-self: center;
+    margin-top: 0;
+    transform: translateY(5px);
   }
 
   .timeRangeControl,
   .usageTrendRangeControl {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
   }
 
   .usageTrendApiKeySelect {
@@ -3729,15 +3676,15 @@
 
 @container monitoring-page (max-width: 680px) {
   .usageTrendActions {
-    grid-template-columns: minmax(0, 1fr) 132px;
     align-items: center;
-    overflow-x: visible;
+    overflow: visible;
   }
 
   .timeRangeControl,
   .usageTrendRangeControl {
-    width: 100%;
+    flex: 0 1 auto;
     min-width: 0;
+    width: auto;
     overflow-x: auto;
     scrollbar-width: none;
   }
@@ -3749,9 +3696,9 @@
 
   .timeRangeButton,
   .usageTrendRangeButton {
-    flex: 1 0 auto;
-    min-width: 58px;
-    padding: 0 12px;
+    flex: 0 0 auto;
+    min-width: 54px;
+    padding: 0 10px;
   }
 
   .usageTrendApiKeySelect {
@@ -3833,8 +3780,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .trendCardHeader,
-  .rankingHeader {
+  .trendCardHeader {
     flex-direction: column;
   }
 
@@ -3885,7 +3831,7 @@
   }
 
   .rankingHeader {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .rankingMetricSwitch {

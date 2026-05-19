@@ -111,28 +111,29 @@ export function isDisabledAuthFile(file: AuthFileItem): boolean {
   return readBooleanValue(raw);
 }
 
-export function isQuotaLowState(quota: unknown): boolean {
-  if (!quota || typeof quota !== 'object' || Array.isArray(quota)) return false;
-  const quotaRecord = quota as Record<string, unknown>;
-  if (quotaRecord.status !== 'success') return false;
+export function isQuotaLowState(quota: unknown, usedPercentThreshold = 100): boolean {
+  if (!isRecordValue(quota)) return false;
+  if (quota.status !== 'success') return false;
 
   return ['windows', 'groups', 'buckets', 'rows'].some((key) => {
-    const value = quotaRecord[key];
-    return Array.isArray(value) && value.some(isQuotaLowWindow);
+    const value = quota[key];
+    return Array.isArray(value) && value.some((window) => isQuotaLowWindow(window, usedPercentThreshold));
   });
 }
 
-function isQuotaLowWindow(window: unknown): boolean {
-  if (!window || typeof window !== 'object' || Array.isArray(window)) return false;
-  const windowRecord = window as Record<string, unknown>;
-  const usedPercent = normalizeNumberValue(windowRecord.usedPercent ?? windowRecord.used_percent);
-  if (usedPercent !== null && usedPercent >= 100) return true;
-  const remainingFraction = normalizeNumberValue(windowRecord.remainingFraction ?? windowRecord.remaining_fraction);
+function isQuotaLowWindow(window: unknown, usedPercentThreshold: number): boolean {
+  if (!isRecordValue(window)) return false;
+  if (readBooleanValue(window.limitReached ?? window.limit_reached)) return true;
+  if (window.allowed !== undefined && !readBooleanValue(window.allowed, true)) return true;
+  const threshold = Number.isFinite(usedPercentThreshold) ? usedPercentThreshold : 100;
+  const usedPercent = normalizeNumberValue(window.usedPercent ?? window.used_percent);
+  if (usedPercent !== null && usedPercent >= threshold) return true;
+  const remainingFraction = normalizeNumberValue(window.remainingFraction ?? window.remaining_fraction);
   if (remainingFraction !== null && remainingFraction <= 0) return true;
-  const remainingAmount = normalizeNumberValue(windowRecord.remainingAmount ?? windowRecord.remaining_amount ?? windowRecord.remaining);
+  const remainingAmount = normalizeNumberValue(window.remainingAmount ?? window.remaining_amount ?? window.remaining);
   if (remainingAmount !== null && remainingAmount <= 0) return true;
-  const limit = normalizeNumberValue(windowRecord.limit);
-  const used = normalizeNumberValue(windowRecord.used);
+  const limit = normalizeNumberValue(window.limit);
+  const used = normalizeNumberValue(window.used);
   return limit !== null && limit > 0 && used !== null && used >= limit;
 }
 
