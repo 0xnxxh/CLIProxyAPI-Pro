@@ -62,18 +62,19 @@ var accountInspectionSupportedProviders = map[string]struct{}{
 var accountInspectionSchedulers sync.Map
 
 type accountInspectionSettings struct {
-	TargetType                     string                  `json:"targetType"`
-	Workers                        int                     `json:"workers"`
-	DeleteWorkers                  int                     `json:"deleteWorkers"`
-	Timeout                        int                     `json:"timeout"`
-	Retries                        int                     `json:"retries"`
-	UsedPercentThreshold           int                     `json:"usedPercentThreshold"`
-	SampleSize                     int                     `json:"sampleSize"`
-	AntigravityDeepProbeEnabled    bool                    `json:"antigravityDeepProbeEnabled"`
-	AntigravityDeepProbeModel      string                  `json:"antigravityDeepProbeModel"`
-	AutoExecuteQuotaLimitDisable   bool                    `json:"autoExecuteQuotaLimitDisable"`
-	AutoExecuteQuotaRecoveryEnable bool                    `json:"autoExecuteQuotaRecoveryEnable"`
-	AutoExecuteAccountErrorAction  accountInspectionAction `json:"autoExecuteAccountErrorAction"`
+	TargetType                     string                                `json:"targetType"`
+	Workers                        int                                   `json:"workers"`
+	DeleteWorkers                  int                                   `json:"deleteWorkers"`
+	Timeout                        int                                   `json:"timeout"`
+	Retries                        int                                   `json:"retries"`
+	UsedPercentThreshold           int                                   `json:"usedPercentThreshold"`
+	SampleSize                     int                                   `json:"sampleSize"`
+	AntigravityDeepProbeEnabled    bool                                  `json:"antigravityDeepProbeEnabled"`
+	AntigravityDeepProbeModel      string                                `json:"antigravityDeepProbeModel"`
+	AntigravityQuotaMode           accountInspectionAntigravityQuotaMode `json:"antigravityQuotaMode"`
+	AutoExecuteQuotaLimitDisable   bool                                  `json:"autoExecuteQuotaLimitDisable"`
+	AutoExecuteQuotaRecoveryEnable bool                                  `json:"autoExecuteQuotaRecoveryEnable"`
+	AutoExecuteAccountErrorAction  accountInspectionAction               `json:"autoExecuteAccountErrorAction"`
 }
 
 type accountInspectionSchedule struct {
@@ -137,6 +138,8 @@ type accountInspectionStreamMessageType string
 
 type accountInspectionDeepProbeStatus string
 
+type accountInspectionAntigravityQuotaMode string
+
 type accountInspectionAction string
 
 const (
@@ -159,6 +162,11 @@ const (
 	accountInspectionDeepProbeAuthError      accountInspectionDeepProbeStatus = "auth_error"
 	accountInspectionDeepProbeTransientError accountInspectionDeepProbeStatus = "transient_error"
 	accountInspectionDeepProbeSkipped        accountInspectionDeepProbeStatus = "skipped"
+)
+
+const (
+	accountInspectionAntigravityQuotaModeMaxUsed   accountInspectionAntigravityQuotaMode = "max-used"
+	accountInspectionAntigravityQuotaModeClaudeGpt accountInspectionAntigravityQuotaMode = "claude-gpt"
 )
 
 const (
@@ -339,6 +347,7 @@ func defaultAccountInspectionSettings() accountInspectionSettings {
 		SampleSize:                     0,
 		AntigravityDeepProbeEnabled:    false,
 		AntigravityDeepProbeModel:      "claude-sonnet-4-6",
+		AntigravityQuotaMode:           accountInspectionAntigravityQuotaModeClaudeGpt,
 		AutoExecuteQuotaLimitDisable:   false,
 		AutoExecuteQuotaRecoveryEnable: false,
 		AutoExecuteAccountErrorAction:  accountInspectionActionNone,
@@ -394,6 +403,10 @@ func normalizeAccountInspectionSchedule(input accountInspectionSchedule) account
 	settings.AntigravityDeepProbeModel = strings.TrimSpace(settings.AntigravityDeepProbeModel)
 	if settings.AntigravityDeepProbeModel == "" {
 		settings.AntigravityDeepProbeModel = defaults.AntigravityDeepProbeModel
+	}
+	settings.AntigravityQuotaMode = accountInspectionAntigravityQuotaMode(strings.ToLower(strings.TrimSpace(string(settings.AntigravityQuotaMode))))
+	if settings.AntigravityQuotaMode != accountInspectionAntigravityQuotaModeMaxUsed && settings.AntigravityQuotaMode != accountInspectionAntigravityQuotaModeClaudeGpt {
+		settings.AntigravityQuotaMode = defaults.AntigravityQuotaMode
 	}
 	settings.AutoExecuteAccountErrorAction = accountInspectionAction(strings.ToLower(strings.TrimSpace(string(settings.AutoExecuteAccountErrorAction))))
 	if settings.AutoExecuteAccountErrorAction != accountInspectionActionDisable && settings.AutoExecuteAccountErrorAction != accountInspectionActionDelete {
@@ -1479,7 +1492,7 @@ func (s *accountInspectionScheduler) inspectAntigravity(ctx context.Context, acc
 			continue
 		}
 		s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"groups": groups}), appendLog)
-		used := antigravityClaudeGptUsedPercent(groups)
+		used := antigravityUsedPercent(groups, settings.AntigravityQuotaMode)
 		decision := quotaDecision(account, used, used != nil, settings.UsedPercentThreshold)
 		if settings.AntigravityDeepProbeEnabled && antigravityShouldDeepProbe(decision) {
 			return s.applyAntigravityDeepProbe(ctx, account, settings, groups, decision, status, appendLog)
@@ -2485,17 +2498,34 @@ func antigravityRemainingFraction(entry map[string]any) (float64, bool) {
 	return 0, false
 }
 
+func antigravityUsedPercent(groups []map[string]any, mode accountInspectionAntigravityQuotaMode) *float64 {
+	if mode == accountInspectionAntigravityQuotaModeMaxUsed {
+		values := make([]float64, 0, len(groups))
+		for _, group := range groups {
+			if used := antigravityGroupUsedPercent(group); used != nil {
+				values = append(values, *used)
+			}
+		}
+		return maxFloatPtr(values)
+	}
+	return antigravityClaudeGptUsedPercent(groups)
+}
+
+func antigravityGroupUsedPercent(group map[string]any) *float64 {
+	remaining, ok := floatFromAny(group["remainingFraction"])
+	if !ok {
+		return nil
+	}
+	used := math.Max(0, math.Min(100, (1-normalizeFraction(remaining))*100))
+	return &used
+}
+
 func antigravityClaudeGptUsedPercent(groups []map[string]any) *float64 {
 	for _, group := range groups {
 		if stringFromAny(group["id"]) != "claude-gpt" {
 			continue
 		}
-		remaining, ok := floatFromAny(group["remainingFraction"])
-		if !ok {
-			return nil
-		}
-		used := math.Max(0, math.Min(100, (1-normalizeFraction(remaining))*100))
-		return &used
+		return antigravityGroupUsedPercent(group)
 	}
 	return nil
 }

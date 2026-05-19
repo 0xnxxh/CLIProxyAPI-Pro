@@ -23,9 +23,11 @@ import {
   hasAccountInspectionAutoExecutePolicies,
   isSuggestedAction,
   loadAccountInspectionConfigurableSettings,
+  normalizeAntigravityQuotaMode,
   normalizeAutoErrorAction,
   saveAccountInspectionConfigurableSettings,
   type AccountInspectionAction,
+  type AccountInspectionAntigravityQuotaMode,
   type AccountInspectionAutoErrorAction,
   type AccountInspectionConfigurableSettings,
   type AccountInspectionLogLevel,
@@ -44,7 +46,7 @@ import {
 import { quotaPersistenceMiddleware } from '@/extensions/quota/persistenceMiddleware';
 import { useAuthStore, useConfigStore, useNotificationStore, useQuotaStore } from '@/stores';
 import type { AuthFileItem, AuthFilesResponse } from '@/types';
-import { isDisabledAuthFile, isQuotaLowState, readBooleanValue, resolveAuthProvider } from '@/utils/quota';
+import { isDisabledAuthFile, isQuotaLowState, isRecordValue, normalizeNumberValue, readBooleanValue, resolveAuthProvider } from '@/utils/quota';
 import { resolveProviderDisplayLabel } from '@/utils/sourceResolver';
 import styles from './AccountInspectionPage.module.scss';
 
@@ -96,6 +98,7 @@ type InspectionSettingsDraft = {
   sampleSize: string;
   antigravityDeepProbeEnabled: boolean;
   antigravityDeepProbeModel: string;
+  antigravityQuotaMode: AccountInspectionAntigravityQuotaMode;
   autoExecuteQuotaLimitDisable: boolean;
   autoExecuteQuotaRecoveryEnable: boolean;
   autoExecuteAccountErrorAction: AccountInspectionAutoErrorAction;
@@ -103,7 +106,7 @@ type InspectionSettingsDraft = {
 
 type InspectionSettingsDraftField = Exclude<
   keyof InspectionSettingsDraft,
-  'antigravityDeepProbeEnabled' | 'autoExecuteQuotaLimitDisable' | 'autoExecuteQuotaRecoveryEnable' | 'autoExecuteAccountErrorAction'
+  'antigravityDeepProbeEnabled' | 'antigravityQuotaMode' | 'autoExecuteQuotaLimitDisable' | 'autoExecuteQuotaRecoveryEnable' | 'autoExecuteAccountErrorAction'
 >;
 
 type ScheduleDraft = {
@@ -437,10 +440,72 @@ const emptyProviderAccountStats = (provider: string): ProviderAccountStats => ({
   abnormal: 0,
 });
 
+const quotaUsedPercentFromRemaining = (item: unknown): number | null => {
+  if (!isRecordValue(item)) return null;
+  const usedPercent = normalizeNumberValue(item.usedPercent ?? item.used_percent);
+  if (usedPercent !== null) return Math.max(0, Math.min(100, usedPercent));
+  const remainingFraction = normalizeNumberValue(item.remainingFraction ?? item.remaining_fraction);
+  if (remainingFraction === null) return null;
+  const normalized = remainingFraction > 1 && remainingFraction <= 100 ? remainingFraction / 100 : remainingFraction;
+  return Math.max(0, Math.min(100, (1 - Math.max(0, Math.min(1, normalized))) * 100));
+};
+
+const maxQuotaUsedPercent = (items: unknown): number | null => {
+  if (!Array.isArray(items)) return null;
+  const values = items
+    .map(quotaUsedPercentFromRemaining)
+    .filter((value): value is number => value !== null);
+  if (values.length === 0) return null;
+  return Math.max(...values);
+};
+
+const isGeminiCliQuotaLow = (quota: unknown, usedPercentThreshold: number) => {
+  if (!isRecordValue(quota) || quota.status !== 'success') return false;
+  const used = maxQuotaUsedPercent(quota.buckets);
+  return used !== null && used >= usedPercentThreshold;
+};
+
+const isAntigravityQuotaLow = (
+  quota: unknown,
+  usedPercentThreshold: number,
+  quotaMode: AccountInspectionAntigravityQuotaMode
+) => {
+  if (!isRecordValue(quota) || quota.status !== 'success') return false;
+  const groups = Array.isArray(quota.groups) ? quota.groups : [];
+  const used = quotaMode === 'max-used'
+    ? maxQuotaUsedPercent(groups)
+    : maxQuotaUsedPercent(groups.filter((group) => isRecordValue(group) && group.id === 'claude-gpt'));
+  return used !== null && used >= usedPercentThreshold;
+};
+
+const isProviderQuotaLow = (
+  provider: string,
+  quotaStore: QuotaAccountStatsState,
+  fileName: string,
+  usedPercentThreshold: number,
+  antigravityQuotaMode: AccountInspectionAntigravityQuotaMode
+) => {
+  switch (provider) {
+    case 'antigravity':
+      return isAntigravityQuotaLow(quotaStore.antigravityQuota[fileName], usedPercentThreshold, antigravityQuotaMode);
+    case 'gemini-cli':
+      return isGeminiCliQuotaLow(quotaStore.geminiCliQuota[fileName], usedPercentThreshold);
+    case 'claude':
+      return isQuotaLowState(quotaStore.claudeQuota[fileName], usedPercentThreshold);
+    case 'codex':
+      return isQuotaLowState(quotaStore.codexQuota[fileName], usedPercentThreshold);
+    case 'kimi':
+      return isQuotaLowState(quotaStore.kimiQuota[fileName], usedPercentThreshold);
+    default:
+      return false;
+  }
+};
+
 const buildAuthFileAccountStats = (
   files: AuthFileItem[],
   quotaStore: QuotaAccountStatsState,
-  usedPercentThreshold: number
+  usedPercentThreshold: number,
+  antigravityQuotaMode: AccountInspectionAntigravityQuotaMode
 ): AuthFileAccountStats => {
   const providerStats = new Map<string, ProviderAccountStats>();
   const stats: AuthFileAccountStats = {
@@ -454,13 +519,15 @@ const buildAuthFileAccountStats = (
     providers: [],
   };
 
-  const quotaMaps = Object.values(quotaStore);
-
   files.forEach((file) => {
     const provider = resolveAuthProvider(file) || 'unknown';
     const disabled = isDisabledAuthFile(file);
-    const quotaLow = quotaMaps.some((providerQuota) =>
-      isQuotaLowState(providerQuota[file.name], usedPercentThreshold)
+    const quotaLow = isProviderQuotaLow(
+      provider,
+      quotaStore,
+      file.name,
+      usedPercentThreshold,
+      antigravityQuotaMode
     );
     const abnormal = isAuthFileAbnormal(file);
     const highAvailable = !disabled && !quotaLow && !abnormal;
@@ -558,6 +625,11 @@ const AUTO_ERROR_ACTION_OPTIONS: Array<{ value: AccountInspectionAutoErrorAction
   { value: 'delete', labelKey: 'monitoring.account_inspection_settings_account_error_action_delete' },
 ];
 
+const ANTIGRAVITY_QUOTA_MODE_OPTIONS: Array<{ value: AccountInspectionAntigravityQuotaMode; labelKey: string }> = [
+  { value: 'claude-gpt', labelKey: 'monitoring.account_inspection_settings_antigravity_quota_mode_claude_gpt' },
+  { value: 'max-used', labelKey: 'monitoring.account_inspection_settings_antigravity_quota_mode_max_used' },
+];
+
 const {
   workers: WORKER_LIMITS,
   deleteWorkers: DELETE_WORKER_LIMITS,
@@ -585,6 +657,7 @@ const toSettingsDraft = (settings: AccountInspectionConfigurableSettings): Inspe
   sampleSize: String(settings.sampleSize),
   antigravityDeepProbeEnabled: settings.antigravityDeepProbeEnabled,
   antigravityDeepProbeModel: settings.antigravityDeepProbeModel,
+  antigravityQuotaMode: settings.antigravityQuotaMode,
   autoExecuteQuotaLimitDisable: settings.autoExecuteQuotaLimitDisable,
   autoExecuteQuotaRecoveryEnable: settings.autoExecuteQuotaRecoveryEnable,
   autoExecuteAccountErrorAction: settings.autoExecuteAccountErrorAction,
@@ -888,6 +961,7 @@ const sameInspectionSettings = (left: AccountInspectionConfigurableSettings, rig
   left.sampleSize === right.sampleSize &&
   left.antigravityDeepProbeEnabled === right.antigravityDeepProbeEnabled &&
   left.antigravityDeepProbeModel === right.antigravityDeepProbeModel &&
+  left.antigravityQuotaMode === right.antigravityQuotaMode &&
   left.autoExecuteQuotaLimitDisable === right.autoExecuteQuotaLimitDisable &&
   left.autoExecuteQuotaRecoveryEnable === right.autoExecuteQuotaRecoveryEnable &&
   left.autoExecuteAccountErrorAction === right.autoExecuteAccountErrorAction;
@@ -902,6 +976,7 @@ const sameSettingsDraft = (left: InspectionSettingsDraft, right: InspectionSetti
   left.sampleSize === right.sampleSize &&
   left.antigravityDeepProbeEnabled === right.antigravityDeepProbeEnabled &&
   left.antigravityDeepProbeModel === right.antigravityDeepProbeModel &&
+  left.antigravityQuotaMode === right.antigravityQuotaMode &&
   left.autoExecuteQuotaLimitDisable === right.autoExecuteQuotaLimitDisable &&
   left.autoExecuteQuotaRecoveryEnable === right.autoExecuteQuotaRecoveryEnable &&
   left.autoExecuteAccountErrorAction === right.autoExecuteAccountErrorAction;
@@ -1592,8 +1667,13 @@ export function AccountInspectionPage() {
   );
 
   const authFileStats = useMemo(
-    () => buildAuthFileAccountStats(authFiles, quotaStore, inspectionSettings.usedPercentThreshold),
-    [authFiles, inspectionSettings.usedPercentThreshold, quotaStore]
+    () => buildAuthFileAccountStats(
+      authFiles,
+      quotaStore,
+      inspectionSettings.usedPercentThreshold,
+      inspectionSettings.antigravityQuotaMode
+    ),
+    [authFiles, inspectionSettings.antigravityQuotaMode, inspectionSettings.usedPercentThreshold, quotaStore]
   );
 
   useEffect(() => {
@@ -1775,6 +1855,13 @@ export function AccountInspectionPage() {
     });
   }, []);
 
+  const handleAntigravityQuotaModeChange = useCallback((value: string) => {
+    dispatchBackendState({
+      type: 'updateSettingsDraft',
+      values: { antigravityQuotaMode: normalizeAntigravityQuotaMode(value) },
+    });
+  }, []);
+
   const handleAutoExecuteQuotaLimitChange = useCallback((value: boolean) => {
     dispatchBackendState({
       type: 'updateSettingsDraft',
@@ -1865,6 +1952,7 @@ export function AccountInspectionPage() {
         })(),
         antigravityDeepProbeEnabled: settingsDraft.antigravityDeepProbeEnabled,
         antigravityDeepProbeModel: settingsDraft.antigravityDeepProbeModel,
+        antigravityQuotaMode: settingsDraft.antigravityQuotaMode,
         autoExecuteQuotaLimitDisable: settingsDraft.autoExecuteQuotaLimitDisable,
         autoExecuteQuotaRecoveryEnable: settingsDraft.autoExecuteQuotaRecoveryEnable,
         autoExecuteAccountErrorAction: settingsDraft.autoExecuteAccountErrorAction,
@@ -2505,6 +2593,23 @@ export function AccountInspectionPage() {
                 value={settingsDraft.antigravityDeepProbeModel}
                 onChange={(event) => handleSettingsDraftChange('antigravityDeepProbeModel', event.target.value)}
               />
+            </div>
+            <div className={styles.settingsPolicyCard}>
+              <label className={styles.settingsLabel}>
+                {t('monitoring.account_inspection_settings_antigravity_quota_mode_label', { defaultValue: 'Antigravity Quota Judgment' })}
+              </label>
+              <Select
+                value={settingsDraft.antigravityQuotaMode}
+                options={ANTIGRAVITY_QUOTA_MODE_OPTIONS.map((option) => ({
+                  value: option.value,
+                  label: t(option.labelKey),
+                }))}
+                onChange={handleAntigravityQuotaModeChange}
+                ariaLabel={t('monitoring.account_inspection_settings_antigravity_quota_mode_label', { defaultValue: 'Antigravity Quota Judgment' })}
+              />
+              <span className={styles.settingsHint}>
+                {t('monitoring.account_inspection_settings_antigravity_quota_mode_hint', { defaultValue: 'Controls how Antigravity quota groups are judged in account inspection and asset overview.' })}
+              </span>
             </div>
           </div>
         </section>

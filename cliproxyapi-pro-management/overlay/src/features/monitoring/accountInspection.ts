@@ -8,6 +8,7 @@ export type AccountInspectionExecutionAction = Exclude<AccountInspectionAction, 
 export type AccountInspectionProgressStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'completed';
 export type AccountInspectionDeepProbeStatus = 'success' | 'quota' | 'auth_error' | 'transient_error' | 'skipped' | '';
 export type AccountInspectionAutoErrorAction = 'none' | 'disable' | 'delete';
+export type AccountInspectionAntigravityQuotaMode = 'max-used' | 'claude-gpt';
 
 export interface AccountInspectionSettings {
   baseUrl: string;
@@ -31,6 +32,7 @@ export interface AccountInspectionConfigurableSettings {
   sampleSize: number;
   antigravityDeepProbeEnabled: boolean;
   antigravityDeepProbeModel: string;
+  antigravityQuotaMode: AccountInspectionAntigravityQuotaMode;
   autoExecuteQuotaLimitDisable: boolean;
   autoExecuteQuotaRecoveryEnable: boolean;
   autoExecuteAccountErrorAction: AccountInspectionAutoErrorAction;
@@ -221,6 +223,7 @@ export const DEFAULT_ACCOUNT_INSPECTION_SETTINGS: AccountInspectionConfigurableS
   sampleSize: 0,
   antigravityDeepProbeEnabled: false,
   antigravityDeepProbeModel: 'claude-sonnet-4-6',
+  antigravityQuotaMode: 'claude-gpt',
   autoExecuteQuotaLimitDisable: false,
   autoExecuteQuotaRecoveryEnable: false,
   autoExecuteAccountErrorAction: 'none',
@@ -258,6 +261,11 @@ const normalizeThreshold = (value: number | undefined) => {
 export const normalizeAutoErrorAction = (value: unknown): AccountInspectionAutoErrorAction => {
   const normalized = readStringValue(value).toLowerCase();
   return normalized === 'disable' || normalized === 'delete' ? normalized : 'none';
+};
+
+export const normalizeAntigravityQuotaMode = (value: unknown): AccountInspectionAntigravityQuotaMode => {
+  const normalized = readStringValue(value).toLowerCase();
+  return normalized === 'max-used' ? 'max-used' : 'claude-gpt';
 };
 
 export const formatAccountInspectionIdentity = (
@@ -322,6 +330,7 @@ const readConfigurableSettingsFromConfig = (
     autoExecuteAccountErrorAction: undefined,
     antigravityDeepProbeEnabled: undefined,
     antigravityDeepProbeModel: undefined,
+    antigravityQuotaMode: undefined,
   };
 };
 
@@ -384,6 +393,7 @@ const normalizeConfigurableSettings = (
     ),
     antigravityDeepProbeModel: readStringValue(merged.antigravityDeepProbeModel) ||
       DEFAULT_ACCOUNT_INSPECTION_SETTINGS.antigravityDeepProbeModel,
+    antigravityQuotaMode: normalizeAntigravityQuotaMode(merged.antigravityQuotaMode),
     autoExecuteAccountErrorAction: normalizeAutoErrorAction(merged.autoExecuteAccountErrorAction),
   };
 };
