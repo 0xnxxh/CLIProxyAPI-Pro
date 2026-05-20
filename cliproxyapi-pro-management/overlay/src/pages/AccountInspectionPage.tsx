@@ -47,7 +47,7 @@ import {
 import { quotaPersistenceMiddleware } from '@/extensions/quota/persistenceMiddleware';
 import { useAuthStore, useConfigStore, useNotificationStore, useQuotaStore } from '@/stores';
 import type { AuthFileItem, AuthFilesResponse } from '@/types';
-import { isDisabledAuthFile, isQuotaLowState, isRecordValue, normalizeNumberValue, readBooleanValue, resolveAuthProvider } from '@/utils/quota';
+import { isDisabledAuthFile, isQuotaLowState, isRecordValue, normalizeNumberValue, readBooleanValue, readStringValue, resolveAuthProvider } from '@/utils/quota';
 import { resolveProviderDisplayLabel } from '@/utils/sourceResolver';
 import styles from './AccountInspectionPage.module.scss';
 
@@ -104,12 +104,13 @@ type InspectionSettingsDraft = {
   antigravityQuotaMode: AccountInspectionAntigravityQuotaMode;
   autoExecuteQuotaLimitDisable: boolean;
   autoExecuteQuotaRecoveryEnable: boolean;
-  autoExecuteAccountErrorAction: AccountInspectionAutoErrorAction;
+  autoExecuteAccountInvalidAction: AccountInspectionAutoErrorAction;
+  autoExecuteRequestErrorAction: AccountInspectionAutoErrorAction;
 };
 
 type InspectionSettingsDraftField = Exclude<
   keyof InspectionSettingsDraft,
-  'antigravityDeepProbeEnabled' | 'antigravityQuotaMode' | 'autoExecuteQuotaLimitDisable' | 'autoExecuteQuotaRecoveryEnable' | 'autoExecuteAccountErrorAction'
+  'antigravityDeepProbeEnabled' | 'antigravityQuotaMode' | 'autoExecuteQuotaLimitDisable' | 'autoExecuteQuotaRecoveryEnable' | 'autoExecuteAccountInvalidAction' | 'autoExecuteRequestErrorAction'
 >;
 
 type ScheduleDraft = {
@@ -124,7 +125,8 @@ type ProviderAccountStats = {
   highAvailable: number;
   disabled: number;
   quotaLow: number;
-  abnormal: number;
+  accountInvalid: number;
+  requestError: number;
 };
 
 type ResolvedTheme = 'light' | 'dark';
@@ -136,7 +138,8 @@ type AuthFileAccountStats = {
   highAvailable: number;
   disabled: number;
   quotaLow: number;
-  abnormal: number;
+  accountInvalid: number;
+  requestError: number;
   providers: ProviderAccountStats[];
 };
 
@@ -422,28 +425,41 @@ const resolveResultHealthStatus = (item: AccountInspectionResultItem): ResultHea
   return 'healthy';
 };
 
+const ACCOUNT_INVALID_ERROR_STATUSES = new Set([400, 401, 403, 404]);
+
 const readAuthFileStatusMessage = (file: AuthFileItem) => {
   const raw = file['status_message'] ?? file.statusMessage;
   if (raw === undefined || raw === null) return '';
   return String(raw).trim();
 };
 
-const hasAuthFileLastError = (file: AuthFileItem) => {
+const readAuthFileLastError = (file: AuthFileItem) => {
   const raw = file['last_error'] ?? file.lastError;
-  if (!raw) return false;
-  if (typeof raw === 'string') return raw.trim().length > 0;
-  return true;
+  return isRecordValue(raw) ? raw : null;
 };
 
-const isAuthFileAbnormal = (file: AuthFileItem) => {
+const readAuthFileLastErrorCode = (file: AuthFileItem) => readStringValue(readAuthFileLastError(file)?.code);
+
+const readAuthFileLastErrorStatus = (file: AuthFileItem) => {
+  const error = readAuthFileLastError(file);
+  return error ? normalizeNumberValue(error.http_status ?? error.httpStatus ?? error.status) : null;
+};
+
+const isAuthFileAccountInvalid = (file: AuthFileItem) =>
+  readAuthFileLastErrorCode(file) === 'inspection_http_error' &&
+  ACCOUNT_INVALID_ERROR_STATUSES.has(readAuthFileLastErrorStatus(file) ?? 0);
+
+const isAuthFileRequestError = (file: AuthFileItem) => {
+  const code = readAuthFileLastErrorCode(file);
+  if (code === 'inspection_probe_error' || code === 'antigravity_deep_probe_error') return true;
+  if (isAuthFileAccountInvalid(file)) return false;
+  if (readAuthFileLastError(file)) return true;
   if (readBooleanValue(file.unavailable ?? file['unavailable'])) return true;
-  if (hasAuthFileLastError(file)) return true;
   const status = String(file.status ?? file.state ?? '').trim().toLowerCase();
-  if (status && !['active', 'disabled', 'pending', 'refreshing'].includes(status)) return true;
-  return readAuthFileStatusMessage(file).length > 0;
+  return status === 'error' || readAuthFileStatusMessage(file).length > 0;
 };
 
-const incrementProviderStats = (stats: ProviderAccountStats, disabled: boolean, highAvailable: boolean, quotaLow: boolean, abnormal: boolean) => {
+const incrementProviderStats = (stats: ProviderAccountStats, disabled: boolean, highAvailable: boolean, quotaLow: boolean, accountInvalid: boolean, requestError: boolean) => {
   stats.total += 1;
   if (disabled) {
     stats.disabled += 1;
@@ -452,7 +468,8 @@ const incrementProviderStats = (stats: ProviderAccountStats, disabled: boolean, 
   }
   if (highAvailable) stats.highAvailable += 1;
   if (quotaLow) stats.quotaLow += 1;
-  if (abnormal) stats.abnormal += 1;
+  if (accountInvalid) stats.accountInvalid += 1;
+  if (requestError) stats.requestError += 1;
 };
 
 const emptyProviderAccountStats = (provider: string): ProviderAccountStats => ({
@@ -462,7 +479,8 @@ const emptyProviderAccountStats = (provider: string): ProviderAccountStats => ({
   highAvailable: 0,
   disabled: 0,
   quotaLow: 0,
-  abnormal: 0,
+  accountInvalid: 0,
+  requestError: 0,
 });
 
 const quotaUsedPercentFromRemaining = (item: unknown): number | null => {
@@ -540,7 +558,8 @@ const buildAuthFileAccountStats = (
     highAvailable: 0,
     disabled: 0,
     quotaLow: 0,
-    abnormal: 0,
+    accountInvalid: 0,
+    requestError: 0,
     providers: [],
   };
 
@@ -554,8 +573,9 @@ const buildAuthFileAccountStats = (
       usedPercentThreshold,
       antigravityQuotaMode
     );
-    const abnormal = isAuthFileAbnormal(file);
-    const highAvailable = !disabled && !quotaLow && !abnormal;
+    const accountInvalid = isAuthFileAccountInvalid(file);
+    const requestError = isAuthFileRequestError(file);
+    const highAvailable = !disabled && !quotaLow && !accountInvalid && !requestError;
 
     if (disabled) {
       stats.disabled += 1;
@@ -563,11 +583,12 @@ const buildAuthFileAccountStats = (
       stats.enabled += 1;
     }
     if (highAvailable) stats.highAvailable += 1;
-    if (abnormal) stats.abnormal += 1;
+    if (accountInvalid) stats.accountInvalid += 1;
+    if (requestError) stats.requestError += 1;
     if (quotaLow) stats.quotaLow += 1;
 
     const providerEntry = providerStats.get(provider) ?? emptyProviderAccountStats(provider);
-    incrementProviderStats(providerEntry, disabled, highAvailable, quotaLow, abnormal);
+    incrementProviderStats(providerEntry, disabled, highAvailable, quotaLow, accountInvalid, requestError);
     providerStats.set(provider, providerEntry);
   });
 
@@ -717,7 +738,8 @@ const toSettingsDraft = (settings: AccountInspectionConfigurableSettings): Inspe
   antigravityQuotaMode: settings.antigravityQuotaMode,
   autoExecuteQuotaLimitDisable: settings.autoExecuteQuotaLimitDisable,
   autoExecuteQuotaRecoveryEnable: settings.autoExecuteQuotaRecoveryEnable,
-  autoExecuteAccountErrorAction: settings.autoExecuteAccountErrorAction,
+  autoExecuteAccountInvalidAction: settings.autoExecuteAccountInvalidAction,
+  autoExecuteRequestErrorAction: settings.autoExecuteRequestErrorAction,
 });
 
 const formatActionLabel = (action: AccountInspectionAction, t: ReturnType<typeof useTranslation>['t']) => {
@@ -1023,7 +1045,8 @@ const sameInspectionSettings = (left: AccountInspectionConfigurableSettings, rig
   left.antigravityQuotaMode === right.antigravityQuotaMode &&
   left.autoExecuteQuotaLimitDisable === right.autoExecuteQuotaLimitDisable &&
   left.autoExecuteQuotaRecoveryEnable === right.autoExecuteQuotaRecoveryEnable &&
-  left.autoExecuteAccountErrorAction === right.autoExecuteAccountErrorAction;
+  left.autoExecuteAccountInvalidAction === right.autoExecuteAccountInvalidAction &&
+  left.autoExecuteRequestErrorAction === right.autoExecuteRequestErrorAction;
 
 const sameSettingsDraft = (left: InspectionSettingsDraft, right: InspectionSettingsDraft) =>
   left.targetType === right.targetType &&
@@ -1038,7 +1061,8 @@ const sameSettingsDraft = (left: InspectionSettingsDraft, right: InspectionSetti
   left.antigravityQuotaMode === right.antigravityQuotaMode &&
   left.autoExecuteQuotaLimitDisable === right.autoExecuteQuotaLimitDisable &&
   left.autoExecuteQuotaRecoveryEnable === right.autoExecuteQuotaRecoveryEnable &&
-  left.autoExecuteAccountErrorAction === right.autoExecuteAccountErrorAction;
+  left.autoExecuteAccountInvalidAction === right.autoExecuteAccountInvalidAction &&
+  left.autoExecuteRequestErrorAction === right.autoExecuteRequestErrorAction;
 
 const sameScheduleDraft = (left: ScheduleDraft, right: ScheduleDraft) =>
   left.enabled === right.enabled && left.intervalMinutes === right.intervalMinutes;
@@ -1728,11 +1752,11 @@ export function AccountInspectionPage() {
       tone: authFilesLoaded && selectedAssetStats.enabled > 0 ? 'good' : 'neutral',
     },
     {
-      key: 'highAvailable',
-      label: t('monitoring.account_inspection_high_available'),
-      value: authFilesLoaded ? String(selectedAssetStats.highAvailable) : '--',
-      description: t('monitoring.account_inspection_high_available_desc'),
-      tone: authFilesLoaded && selectedAssetStats.highAvailable > 0 ? 'good' : 'neutral',
+      key: 'disabled',
+      label: t('monitoring.account_inspection_account_disabled'),
+      value: authFilesLoaded ? String(selectedAssetStats.disabled) : '--',
+      description: t('monitoring.account_inspection_blast_radius'),
+      tone: authFilesLoaded && selectedAssetStats.disabled > 0 ? 'warn' : 'neutral',
     },
     {
       key: 'quotaLow',
@@ -1742,18 +1766,18 @@ export function AccountInspectionPage() {
       tone: authFilesLoaded && selectedAssetStats.quotaLow > 0 ? 'bad' : 'neutral',
     },
     {
-      key: 'disabled',
-      label: t('monitoring.account_inspection_account_disabled'),
-      value: authFilesLoaded ? String(selectedAssetStats.disabled) : '--',
-      description: t('monitoring.account_inspection_blast_radius'),
-      tone: authFilesLoaded && selectedAssetStats.disabled > 0 ? 'warn' : 'neutral',
+      key: 'accountInvalid',
+      label: t('monitoring.account_inspection_account_invalid'),
+      value: authFilesLoaded ? String(selectedAssetStats.accountInvalid) : '--',
+      description: t('monitoring.account_inspection_settings_auto_execute_account_invalid_action_label'),
+      tone: authFilesLoaded && selectedAssetStats.accountInvalid > 0 ? 'bad' : 'neutral',
     },
     {
-      key: 'abnormal',
-      label: t('monitoring.account_inspection_account_abnormal'),
-      value: authFilesLoaded ? String(selectedAssetStats.abnormal) : '--',
-      description: t('monitoring.account_inspection_settings_auto_execute_account_error_action_label'),
-      tone: authFilesLoaded && selectedAssetStats.abnormal > 0 ? 'bad' : 'neutral',
+      key: 'requestError',
+      label: t('monitoring.account_inspection_account_request_error'),
+      value: authFilesLoaded ? String(selectedAssetStats.requestError) : '--',
+      description: t('monitoring.account_inspection_settings_auto_execute_request_error_action_label'),
+      tone: authFilesLoaded && selectedAssetStats.requestError > 0 ? 'bad' : 'neutral',
     },
   ], [authFilesLoaded, selectedAssetLabel, selectedAssetStats, t]);
 
@@ -1782,8 +1806,12 @@ export function AccountInspectionPage() {
   const settingDisabledLabel = t('monitoring.account_inspection_setting_disabled');
   const quotaLimitAutoLabel = inspectionSettings.autoExecuteQuotaLimitDisable ? settingEnabledLabel : settingDisabledLabel;
   const quotaRecoveryAutoLabel = inspectionSettings.autoExecuteQuotaRecoveryEnable ? settingEnabledLabel : settingDisabledLabel;
-  const accountErrorActionLabel = t(
-    AUTO_ERROR_ACTION_OPTIONS.find((option) => option.value === inspectionSettings.autoExecuteAccountErrorAction)?.labelKey
+  const accountInvalidActionLabel = t(
+    AUTO_ERROR_ACTION_OPTIONS.find((option) => option.value === inspectionSettings.autoExecuteAccountInvalidAction)?.labelKey
+      ?? 'monitoring.account_inspection_settings_account_error_action_none'
+  );
+  const requestErrorActionLabel = t(
+    AUTO_ERROR_ACTION_OPTIONS.find((option) => option.value === inspectionSettings.autoExecuteRequestErrorAction)?.labelKey
       ?? 'monitoring.account_inspection_settings_account_error_action_none'
   );
   const scheduleStatusLabel = schedule?.enabled
@@ -1914,11 +1942,20 @@ export function AccountInspectionPage() {
     });
   }, []);
 
-  const handleAutoExecuteAccountErrorActionChange = useCallback((value: string) => {
+  const handleAutoExecuteAccountInvalidActionChange = useCallback((value: string) => {
     dispatchBackendState({
       type: 'updateSettingsDraft',
       values: {
-        autoExecuteAccountErrorAction: normalizeAutoErrorAction(value),
+        autoExecuteAccountInvalidAction: normalizeAutoErrorAction(value),
+      },
+    });
+  }, []);
+
+  const handleAutoExecuteRequestErrorActionChange = useCallback((value: string) => {
+    dispatchBackendState({
+      type: 'updateSettingsDraft',
+      values: {
+        autoExecuteRequestErrorAction: normalizeAutoErrorAction(value),
       },
     });
   }, []);
@@ -1993,7 +2030,8 @@ export function AccountInspectionPage() {
         antigravityQuotaMode: settingsDraft.antigravityQuotaMode,
         autoExecuteQuotaLimitDisable: settingsDraft.autoExecuteQuotaLimitDisable,
         autoExecuteQuotaRecoveryEnable: settingsDraft.autoExecuteQuotaRecoveryEnable,
-        autoExecuteAccountErrorAction: settingsDraft.autoExecuteAccountErrorAction,
+        autoExecuteAccountInvalidAction: settingsDraft.autoExecuteAccountInvalidAction,
+        autoExecuteRequestErrorAction: settingsDraft.autoExecuteRequestErrorAction,
       });
 
       const intervalMinutes = parseIntegerInRange(
@@ -2037,14 +2075,19 @@ export function AccountInspectionPage() {
     ANTIGRAVITY_QUOTA_MODE_OPTIONS.find((option) => option.value === settingsDraft.antigravityQuotaMode)?.labelKey
       ?? 'monitoring.account_inspection_settings_antigravity_quota_mode_claude_gpt'
   );
-  const draftAccountErrorActionLabel = t(
-    AUTO_ERROR_ACTION_OPTIONS.find((option) => option.value === settingsDraft.autoExecuteAccountErrorAction)?.labelKey
+  const draftAccountInvalidActionLabel = t(
+    AUTO_ERROR_ACTION_OPTIONS.find((option) => option.value === settingsDraft.autoExecuteAccountInvalidAction)?.labelKey
+      ?? 'monitoring.account_inspection_settings_account_error_action_none'
+  );
+  const draftRequestErrorActionLabel = t(
+    AUTO_ERROR_ACTION_OPTIONS.find((option) => option.value === settingsDraft.autoExecuteRequestErrorAction)?.labelKey
       ?? 'monitoring.account_inspection_settings_account_error_action_none'
   );
   const draftAutoPolicyLabel = [
     settingsDraft.autoExecuteQuotaLimitDisable ? t('monitoring.account_inspection_settings_auto_execute_quota_limit_disable_label') : '',
     settingsDraft.autoExecuteQuotaRecoveryEnable ? t('monitoring.account_inspection_settings_auto_execute_quota_recovery_enable_label') : '',
-    settingsDraft.autoExecuteAccountErrorAction !== 'none' ? draftAccountErrorActionLabel : '',
+    settingsDraft.autoExecuteAccountInvalidAction !== 'none' ? `${t('monitoring.account_inspection_account_invalid')}: ${draftAccountInvalidActionLabel}` : '',
+    settingsDraft.autoExecuteRequestErrorAction !== 'none' ? `${t('monitoring.account_inspection_account_request_error')}: ${draftRequestErrorActionLabel}` : '',
   ].filter(Boolean).join(' · ') || settingDisabledLabel;
 
   return (
@@ -2204,8 +2247,12 @@ export function AccountInspectionPage() {
                     <strong>{quotaRecoveryAutoLabel}</strong>
                   </span>
                   <span>
-                    <small>{t('monitoring.account_inspection_account_error_action_short')}</small>
-                    <strong>{accountErrorActionLabel}</strong>
+                    <small>{t('monitoring.account_inspection_account_invalid_action_short')}</small>
+                    <strong>{accountInvalidActionLabel}</strong>
+                  </span>
+                  <span>
+                    <small>{t('monitoring.account_inspection_request_error_action_short')}</small>
+                    <strong>{requestErrorActionLabel}</strong>
                   </span>
                   <span>
                     <small>{t('monitoring.account_inspection_next_execution_short')}</small>
@@ -2509,8 +2556,12 @@ export function AccountInspectionPage() {
                 <strong>{`${settingsDraft.usedPercentThreshold || '--'}%`}</strong>
               </span>
               <span>
-                <small>{t('monitoring.account_inspection_account_error_action_short')}</small>
-                <strong>{draftAccountErrorActionLabel}</strong>
+                <small>{t('monitoring.account_inspection_account_invalid_action_short')}</small>
+                <strong>{draftAccountInvalidActionLabel}</strong>
+              </span>
+              <span>
+                <small>{t('monitoring.account_inspection_request_error_action_short')}</small>
+                <strong>{draftRequestErrorActionLabel}</strong>
               </span>
             </div>
           </aside>
@@ -2747,15 +2798,30 @@ export function AccountInspectionPage() {
                   </div>
                 </div>
                 <div className={styles.settingsRiskPanel}>
-                  <label className={styles.settingsLabel}>{t('monitoring.account_inspection_settings_auto_execute_account_error_action_label')}</label>
+                  <label className={styles.settingsLabel}>{t('monitoring.account_inspection_settings_auto_execute_account_invalid_action_label')}</label>
                   <Select
-                    value={settingsDraft.autoExecuteAccountErrorAction}
+                    value={settingsDraft.autoExecuteAccountInvalidAction}
                     options={AUTO_ERROR_ACTION_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
-                    onChange={handleAutoExecuteAccountErrorActionChange}
-                    ariaLabel={t('monitoring.account_inspection_settings_auto_execute_account_error_action_label')}
+                    onChange={handleAutoExecuteAccountInvalidActionChange}
+                    ariaLabel={t('monitoring.account_inspection_settings_auto_execute_account_invalid_action_label')}
                   />
-                  <span>{t('monitoring.account_inspection_settings_auto_execute_account_error_action_hint')}</span>
-                  {settingsDraft.autoExecuteAccountErrorAction === 'delete' ? (
+                  <span>{t('monitoring.account_inspection_settings_auto_execute_account_invalid_action_hint')}</span>
+                  {settingsDraft.autoExecuteAccountInvalidAction === 'delete' ? (
+                    <div className={styles.settingsDangerNote}>
+                      {t('monitoring.account_inspection_delete_irreversible_warning')}
+                    </div>
+                  ) : null}
+                </div>
+                <div className={styles.settingsRiskPanel}>
+                  <label className={styles.settingsLabel}>{t('monitoring.account_inspection_settings_auto_execute_request_error_action_label')}</label>
+                  <Select
+                    value={settingsDraft.autoExecuteRequestErrorAction}
+                    options={AUTO_ERROR_ACTION_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
+                    onChange={handleAutoExecuteRequestErrorActionChange}
+                    ariaLabel={t('monitoring.account_inspection_settings_auto_execute_request_error_action_label')}
+                  />
+                  <span>{t('monitoring.account_inspection_settings_auto_execute_request_error_action_hint')}</span>
+                  {settingsDraft.autoExecuteRequestErrorAction === 'delete' ? (
                     <div className={styles.settingsDangerNote}>
                       {t('monitoring.account_inspection_delete_irreversible_warning')}
                     </div>

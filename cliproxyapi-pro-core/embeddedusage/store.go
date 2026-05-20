@@ -47,7 +47,15 @@ type modelPricesExportRecord struct {
 	ExportedAt int64                 `json:"exported_at_ms"`
 }
 
+type quotaCacheExportRecord struct {
+	RecordType string            `json:"record_type"`
+	Version    int               `json:"version"`
+	Entries    []QuotaCacheEntry `json:"entries"`
+	ExportedAt int64             `json:"exported_at_ms"`
+}
+
 const modelPricesExportRecordType = "model_prices"
+const quotaCacheExportRecordType = "quota_cache"
 
 type Store struct {
 	db           *sql.DB
@@ -320,6 +328,10 @@ func (s *Store) ExportJSONL(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	quotaEntries, err := s.GetQuotaCache(ctx, "", "")
+	if err != nil {
+		return nil, err
+	}
 
 	output := make([]byte, 0)
 	if len(prices) > 0 {
@@ -327,6 +339,19 @@ func (s *Store) ExportJSONL(ctx context.Context) ([]byte, error) {
 			RecordType: modelPricesExportRecordType,
 			Version:    1,
 			Prices:     prices,
+			ExportedAt: time.Now().UnixMilli(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		output = append(output, line...)
+		output = append(output, '\n')
+	}
+	if len(quotaEntries) > 0 {
+		line, err := json.Marshal(quotaCacheExportRecord{
+			RecordType: quotaCacheExportRecordType,
+			Version:    1,
+			Entries:    quotaEntries,
 			ExportedAt: time.Now().UnixMilli(),
 		})
 		if err != nil {

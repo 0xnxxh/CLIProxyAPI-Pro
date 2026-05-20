@@ -62,19 +62,21 @@ var accountInspectionSupportedProviders = map[string]struct{}{
 var accountInspectionSchedulers sync.Map
 
 type accountInspectionSettings struct {
-	TargetType                     string                                `json:"targetType"`
-	Workers                        int                                   `json:"workers"`
-	DeleteWorkers                  int                                   `json:"deleteWorkers"`
-	Timeout                        int                                   `json:"timeout"`
-	Retries                        int                                   `json:"retries"`
-	UsedPercentThreshold           int                                   `json:"usedPercentThreshold"`
-	SampleSize                     int                                   `json:"sampleSize"`
-	AntigravityDeepProbeEnabled    bool                                  `json:"antigravityDeepProbeEnabled"`
-	AntigravityDeepProbeModel      string                                `json:"antigravityDeepProbeModel"`
-	AntigravityQuotaMode           accountInspectionAntigravityQuotaMode `json:"antigravityQuotaMode"`
-	AutoExecuteQuotaLimitDisable   bool                                  `json:"autoExecuteQuotaLimitDisable"`
-	AutoExecuteQuotaRecoveryEnable bool                                  `json:"autoExecuteQuotaRecoveryEnable"`
-	AutoExecuteAccountErrorAction  accountInspectionAction               `json:"autoExecuteAccountErrorAction"`
+	TargetType                      string                                `json:"targetType"`
+	Workers                         int                                   `json:"workers"`
+	DeleteWorkers                   int                                   `json:"deleteWorkers"`
+	Timeout                         int                                   `json:"timeout"`
+	Retries                         int                                   `json:"retries"`
+	UsedPercentThreshold            int                                   `json:"usedPercentThreshold"`
+	SampleSize                      int                                   `json:"sampleSize"`
+	AntigravityDeepProbeEnabled     bool                                  `json:"antigravityDeepProbeEnabled"`
+	AntigravityDeepProbeModel       string                                `json:"antigravityDeepProbeModel"`
+	AntigravityQuotaMode            accountInspectionAntigravityQuotaMode `json:"antigravityQuotaMode"`
+	AutoExecuteQuotaLimitDisable    bool                                  `json:"autoExecuteQuotaLimitDisable"`
+	AutoExecuteQuotaRecoveryEnable  bool                                  `json:"autoExecuteQuotaRecoveryEnable"`
+	AutoExecuteAccountInvalidAction accountInspectionAction               `json:"autoExecuteAccountInvalidAction"`
+	AutoExecuteRequestErrorAction   accountInspectionAction               `json:"autoExecuteRequestErrorAction"`
+	AutoExecuteAccountErrorAction   accountInspectionAction               `json:"autoExecuteAccountErrorAction,omitempty"`
 }
 
 type accountInspectionSchedule struct {
@@ -338,19 +340,20 @@ func accountInspectionSchedulePath() string {
 
 func defaultAccountInspectionSettings() accountInspectionSettings {
 	return accountInspectionSettings{
-		TargetType:                     accountInspectionProviderAll,
-		Workers:                        4,
-		DeleteWorkers:                  4,
-		Timeout:                        accountInspectionDefaultTimeoutMS,
-		Retries:                        0,
-		UsedPercentThreshold:           100,
-		SampleSize:                     0,
-		AntigravityDeepProbeEnabled:    false,
-		AntigravityDeepProbeModel:      "claude-sonnet-4-6",
-		AntigravityQuotaMode:           accountInspectionAntigravityQuotaModeClaudeGpt,
-		AutoExecuteQuotaLimitDisable:   false,
-		AutoExecuteQuotaRecoveryEnable: false,
-		AutoExecuteAccountErrorAction:  accountInspectionActionNone,
+		TargetType:                      accountInspectionProviderAll,
+		Workers:                         4,
+		DeleteWorkers:                   4,
+		Timeout:                         accountInspectionDefaultTimeoutMS,
+		Retries:                         0,
+		UsedPercentThreshold:            100,
+		SampleSize:                      0,
+		AntigravityDeepProbeEnabled:     false,
+		AntigravityDeepProbeModel:       "claude-sonnet-4-6",
+		AntigravityQuotaMode:            accountInspectionAntigravityQuotaModeClaudeGpt,
+		AutoExecuteQuotaLimitDisable:    false,
+		AutoExecuteQuotaRecoveryEnable:  false,
+		AutoExecuteAccountInvalidAction: accountInspectionActionNone,
+		AutoExecuteRequestErrorAction:   accountInspectionActionNone,
 	}
 }
 
@@ -408,10 +411,18 @@ func normalizeAccountInspectionSchedule(input accountInspectionSchedule) account
 	if settings.AntigravityQuotaMode != accountInspectionAntigravityQuotaModeMaxUsed && settings.AntigravityQuotaMode != accountInspectionAntigravityQuotaModeClaudeGpt {
 		settings.AntigravityQuotaMode = defaults.AntigravityQuotaMode
 	}
-	settings.AutoExecuteAccountErrorAction = accountInspectionAction(strings.ToLower(strings.TrimSpace(string(settings.AutoExecuteAccountErrorAction))))
-	if settings.AutoExecuteAccountErrorAction != accountInspectionActionDisable && settings.AutoExecuteAccountErrorAction != accountInspectionActionDelete {
-		settings.AutoExecuteAccountErrorAction = accountInspectionActionNone
+	legacyAccountErrorAction := normalizeAccountInspectionAutoAction(settings.AutoExecuteAccountErrorAction)
+	settings.AutoExecuteAccountInvalidAction = normalizeAccountInspectionAutoAction(settings.AutoExecuteAccountInvalidAction)
+	settings.AutoExecuteRequestErrorAction = normalizeAccountInspectionAutoAction(settings.AutoExecuteRequestErrorAction)
+	if legacyAccountErrorAction != accountInspectionActionNone {
+		if settings.AutoExecuteAccountInvalidAction == accountInspectionActionNone {
+			settings.AutoExecuteAccountInvalidAction = legacyAccountErrorAction
+		}
+		if settings.AutoExecuteRequestErrorAction == accountInspectionActionNone {
+			settings.AutoExecuteRequestErrorAction = legacyAccountErrorAction
+		}
 	}
+	settings.AutoExecuteAccountErrorAction = accountInspectionActionNone
 	input.Settings = settings
 	if input.IntervalMinutes <= 0 {
 		input.IntervalMinutes = accountInspectionDefaultIntervalMin
@@ -423,6 +434,14 @@ func normalizeAccountInspectionSchedule(input accountInspectionSchedule) account
 		input.NextRunAt = 0
 	}
 	return input
+}
+
+func normalizeAccountInspectionAutoAction(action accountInspectionAction) accountInspectionAction {
+	action = accountInspectionAction(strings.ToLower(strings.TrimSpace(string(action))))
+	if action == accountInspectionActionDisable || action == accountInspectionActionDelete {
+		return action
+	}
+	return accountInspectionActionNone
 }
 
 func (s *accountInspectionScheduler) load() {
@@ -570,6 +589,7 @@ func (s *accountInspectionScheduler) importSchedule(raw []byte) error {
 	if err := json.Unmarshal(raw, &schedule); err != nil {
 		return err
 	}
+	schedule.NextRunAt = 0
 	return s.update(schedule)
 }
 
@@ -753,6 +773,7 @@ func (s *accountInspectionScheduler) inspectOne(item accountInspectionActionItem
 		s.mu.Lock()
 		if !s.isRunningLocked() {
 			s.mergeSingleInspectionResultLocked(result)
+			s.status.Results = sortAccountInspectionResults(s.status.Results)
 		}
 		broadcast := s.statusBroadcastLocked(true)
 		s.mu.Unlock()
@@ -817,51 +838,58 @@ func (s *accountInspectionScheduler) refreshTokenNow(ctx context.Context, item a
 	return accountInspectionResult{}, fmt.Errorf("account not found")
 }
 
-func (s *accountInspectionScheduler) mergeTokenRefreshResultLocked(result accountInspectionResult) {
+func sameAccountInspectionResult(a accountInspectionResult, b accountInspectionResult) bool {
+	return a.Key == b.Key || (a.FileName == b.FileName && a.AuthIndex == b.AuthIndex)
+}
+
+func (s *accountInspectionScheduler) updateInspectionResultLocked(result accountInspectionResult, appendMissing bool, update func(accountInspectionResult) (accountInspectionResult, bool)) bool {
 	if result.Key == "" {
-		return
+		return false
 	}
 
 	for index, current := range s.status.Results {
-		if current.Key == result.Key || (current.FileName == result.FileName && current.AuthIndex == result.AuthIndex) {
-			current.Provider = result.Provider
-			current.FileName = result.FileName
-			current.DisplayName = result.DisplayName
-			current.Email = result.Email
-			current.Name = result.Name
-			current.AuthIndex = result.AuthIndex
-			current.Disabled = result.Disabled
-			current.TokenRefreshTriggered = result.TokenRefreshTriggered
-			current.TokenRefreshStatus = result.TokenRefreshStatus
-			current.TokenRefreshError = result.TokenRefreshError
-			current.NextRefreshAt = result.NextRefreshAt
-			s.status.Results[index] = current
-			s.status.Results = sortAccountInspectionResults(s.status.Results)
-			return
+		if sameAccountInspectionResult(current, result) {
+			merged, updateSummary := update(current)
+			if updateSummary {
+				s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, current, -1)
+				s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, merged, 1)
+			}
+			s.status.Results[index] = merged
+			return true
 		}
 	}
 
+	if !appendMissing {
+		return false
+	}
 	s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, result, 1)
-	s.status.Results = sortAccountInspectionResults(append(s.status.Results, result))
+	s.status.Results = append(s.status.Results, result)
+	return true
+}
+
+func (s *accountInspectionScheduler) mergeTokenRefreshResultLocked(result accountInspectionResult) {
+	s.updateInspectionResultLocked(result, true, func(current accountInspectionResult) (accountInspectionResult, bool) {
+		current.Provider = result.Provider
+		current.FileName = result.FileName
+		current.DisplayName = result.DisplayName
+		current.Email = result.Email
+		current.Name = result.Name
+		current.AuthIndex = result.AuthIndex
+		current.Disabled = result.Disabled
+		current.TokenRefreshTriggered = result.TokenRefreshTriggered
+		current.TokenRefreshStatus = result.TokenRefreshStatus
+		current.TokenRefreshError = result.TokenRefreshError
+		current.NextRefreshAt = result.NextRefreshAt
+		return current, false
+	})
 }
 
 func (s *accountInspectionScheduler) mergeSingleInspectionResultLocked(result accountInspectionResult) {
-	if result.Key == "" {
-		return
-	}
-
-	for index, current := range s.status.Results {
-		if current.Key == result.Key || (current.FileName == result.FileName && current.AuthIndex == result.AuthIndex) {
-			result.Executed = current.Executed
-			result.ExecuteError = current.ExecuteError
-			s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, current, -1)
-			s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, result, 1)
-			s.status.Results[index] = result
-			break
-		}
-	}
-
-	s.status.Results = sortAccountInspectionResults(s.status.Results)
+	s.updateInspectionResultLocked(result, false, func(current accountInspectionResult) (accountInspectionResult, bool) {
+		result.Executed = current.Executed
+		result.ExecuteError = current.ExecuteError
+		return result, true
+	})
 }
 
 func (s *accountInspectionScheduler) executeSingleInspection(ctx context.Context, settings accountInspectionSettings, item accountInspectionActionItem) (accountInspectionResult, accountInspectionSummary, error) {
@@ -1122,7 +1150,7 @@ func (s *accountInspectionScheduler) executeInspection(ctx context.Context, sett
 		return partial, summarizeAccountInspection(len(liveAuths), probeSetCount, accounts, partial), err
 	}
 
-	s.applyAutomaticActions(ctx, results, settings, s.appendLog)
+	s.applyAutomaticActions(ctx, results, settings)
 	return results, summarizeAccountInspection(len(liveAuths), probeSetCount, accounts, results), nil
 }
 
@@ -1285,15 +1313,15 @@ func (s *accountInspectionScheduler) inspectAccount(ctx context.Context, account
 	var err error
 	switch account.Provider {
 	case "antigravity":
-		decision, statusCode, err = s.inspectAntigravity(ctx, account, settings, s.appendLog)
+		decision, statusCode, err = s.inspectAntigravity(ctx, account, settings)
 	case "claude":
-		decision, statusCode, err = s.inspectClaude(ctx, account, settings, s.appendLog)
+		decision, statusCode, err = s.inspectClaude(ctx, account, settings)
 	case "codex":
-		decision, statusCode, err = s.inspectCodex(ctx, account, settings, s.appendLog)
+		decision, statusCode, err = s.inspectCodex(ctx, account, settings)
 	case "gemini-cli":
-		decision, statusCode, err = s.inspectGeminiCLI(ctx, account, settings, s.appendLog)
+		decision, statusCode, err = s.inspectGeminiCLI(ctx, account, settings)
 	case "kimi":
-		decision, statusCode, err = s.inspectKimi(ctx, account, settings, s.appendLog)
+		decision, statusCode, err = s.inspectKimi(ctx, account, settings)
 	case "xai":
 		decision, statusCode, err = s.inspectXAI(ctx, account, settings)
 	default:
@@ -1469,7 +1497,7 @@ func (s *accountInspectionScheduler) withRetry(ctx context.Context, retries int,
 	return last, err
 }
 
-func (s *accountInspectionScheduler) inspectAntigravity(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, appendLog func(string, string)) (accountInspectionDecision, *int, error) {
+func (s *accountInspectionScheduler) inspectAntigravity(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings) (accountInspectionDecision, *int, error) {
 	projectID := antigravityProjectID(account.Auth)
 	body := `{"project":"` + escapeJSONString(projectID) + `"}`
 	urls := antigravityQuotaURLs()
@@ -1496,11 +1524,11 @@ func (s *accountInspectionScheduler) inspectAntigravity(ctx context.Context, acc
 		if err != nil {
 			continue
 		}
-		s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"groups": groups}), appendLog)
+		s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"groups": groups}))
 		used := antigravityUsedPercent(groups, settings.AntigravityQuotaMode)
 		decision := quotaDecision(account, used, used != nil, settings.UsedPercentThreshold)
 		if settings.AntigravityDeepProbeEnabled && antigravityShouldDeepProbe(decision) {
-			return s.applyAntigravityDeepProbe(ctx, account, settings, groups, decision, status, appendLog)
+			return s.applyAntigravityDeepProbe(ctx, account, settings, groups, decision, status)
 		}
 		return decision, status, nil
 	}
@@ -1533,7 +1561,7 @@ func antigravityShouldDeepProbe(decision accountInspectionDecision) bool {
 	return decision.Action == accountInspectionActionKeep || decision.Action == accountInspectionActionEnable
 }
 
-func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, groups []map[string]any, decision accountInspectionDecision, quotaStatus *int, appendLog func(string, string)) (accountInspectionDecision, *int, error) {
+func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, groups []map[string]any, decision accountInspectionDecision, quotaStatus *int) (accountInspectionDecision, *int, error) {
 	model := selectAntigravityDeepProbeModel(groups, settings.AntigravityDeepProbeModel)
 	projectID := antigravityProjectID(account.Auth)
 	if model == "" || projectID == "" {
@@ -1543,11 +1571,11 @@ func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Conte
 		} else {
 			decision.DeepProbeError = "missing Antigravity project id"
 		}
-		appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测跳过：%s", account.identity(), decision.DeepProbeError))
+		s.appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测跳过：%s", account.identity(), decision.DeepProbeError))
 		return decision, quotaStatus, nil
 	}
 
-	appendLog("info", fmt.Sprintf("%s Antigravity 深度检测开始：%s", account.identity(), model))
+	s.appendLog("info", fmt.Sprintf("%s Antigravity 深度检测开始：%s", account.identity(), model))
 	body := buildAntigravityDeepProbeBody(projectID, model)
 	var lastStatus *int
 	var lastMessage string
@@ -1570,7 +1598,7 @@ func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Conte
 			s.clearInspectionAuthError(ctx, account)
 			decision.DeepProbeStatus = accountInspectionDeepProbeSuccess
 			decision.DeepProbeError = ""
-			appendLog("success", fmt.Sprintf("%s Antigravity 深度检测通过", account.identity()))
+			s.appendLog("success", fmt.Sprintf("%s Antigravity 深度检测通过", account.identity()))
 			return decision, lastStatus, nil
 		case accountInspectionDeepProbeAuthError:
 			s.syncInspectionAuthStatus(ctx, account, resp.StatusCode)
@@ -1578,7 +1606,7 @@ func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Conte
 			probeDecision.UsedPercent = decision.UsedPercent
 			probeDecision.DeepProbeStatus = accountInspectionDeepProbeAuthError
 			probeDecision.DeepProbeError = probeMessage
-			appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测授权异常：%s", account.identity(), probeMessage))
+			s.appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测授权异常：%s", account.identity(), probeMessage))
 			return probeDecision, lastStatus, nil
 		case accountInspectionDeepProbeQuota:
 			s.clearInspectionAuthError(ctx, account)
@@ -1587,7 +1615,7 @@ func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Conte
 				probeDecision.Action = accountInspectionActionKeep
 				probeDecision.ActionReason = "Antigravity 深度检测返回额度不可用，但账号已禁用"
 			}
-			appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测额度不可用：%s", account.identity(), probeMessage))
+			s.appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测额度不可用：%s", account.identity(), probeMessage))
 			return probeDecision, lastStatus, nil
 		default:
 			lastMessage = probeMessage
@@ -1605,7 +1633,7 @@ func (s *accountInspectionScheduler) applyAntigravityDeepProbe(ctx context.Conte
 	decision.Error = lastMessage
 	decision.DeepProbeStatus = accountInspectionDeepProbeTransientError
 	decision.DeepProbeError = lastMessage
-	appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测临时异常：%s", account.identity(), lastMessage))
+	s.appendLog("warning", fmt.Sprintf("%s Antigravity 深度检测临时异常：%s", account.identity(), lastMessage))
 	return decision, firstStatus(lastStatus, quotaStatus), nil
 }
 
@@ -1742,7 +1770,7 @@ func firstStatus(primary *int, fallback *int) *int {
 	return fallback
 }
 
-func (s *accountInspectionScheduler) inspectClaude(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, appendLog func(string, string)) (accountInspectionDecision, *int, error) {
+func (s *accountInspectionScheduler) inspectClaude(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings) (accountInspectionDecision, *int, error) {
 	usageResp, err := s.withRetry(ctx, settings.Retries, func() (accountInspectionHTTPResult, error) {
 		return s.apiCall(ctx, account.Auth, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", s.claudeHeaders(), "", settings.Timeout)
 	})
@@ -1765,12 +1793,12 @@ func (s *accountInspectionScheduler) inspectClaude(ctx context.Context, account 
 	if profileErr == nil && profileResp.StatusCode >= 200 && profileResp.StatusCode < 300 {
 		planType = resolveClaudePlan(profileResp.Body)
 	}
-	s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"windows": windows, "extraUsage": extraUsage, "planType": emptyStringAsNil(planType)}), appendLog)
+	s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"windows": windows, "extraUsage": extraUsage, "planType": emptyStringAsNil(planType)}))
 	used := maxUsedPercentFromWindows(windows)
 	return quotaDecision(account, used, len(windows) > 0, settings.UsedPercentThreshold), status, nil
 }
 
-func (s *accountInspectionScheduler) inspectCodex(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, appendLog func(string, string)) (accountInspectionDecision, *int, error) {
+func (s *accountInspectionScheduler) inspectCodex(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings) (accountInspectionDecision, *int, error) {
 	accountID := codexAccountID(account.Auth)
 	if accountID == "" {
 		return accountInspectionDecision{}, nil, fmt.Errorf("missing ChatGPT account id")
@@ -1793,12 +1821,12 @@ func (s *accountInspectionScheduler) inspectCodex(ctx context.Context, account a
 		isQuota = true
 	}
 	if payload != nil && len(windows) > 0 {
-		s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"windows": windows, "planType": codexPlanType(account.Auth, payload)}), appendLog)
+		s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"windows": windows, "planType": codexPlanType(account.Auth, payload)}))
 	}
 	return codexDecision(account, resp.StatusCode, used, isQuota, settings.UsedPercentThreshold), status, nil
 }
 
-func (s *accountInspectionScheduler) inspectGeminiCLI(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, appendLog func(string, string)) (accountInspectionDecision, *int, error) {
+func (s *accountInspectionScheduler) inspectGeminiCLI(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings) (accountInspectionDecision, *int, error) {
 	projectID := geminiCLIProjectID(account.Auth)
 	if projectID == "" {
 		return accountInspectionDecision{}, nil, fmt.Errorf("missing Gemini CLI project id")
@@ -1825,7 +1853,7 @@ func (s *accountInspectionScheduler) inspectGeminiCLI(ctx context.Context, accou
 		return accountInspectionDecision{}, status, err
 	}
 	supplementary := s.fetchGeminiCLISupplementary(ctx, account, projectID, settings)
-	s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"buckets": buckets, "tierLabel": supplementary["tierLabel"], "tierId": supplementary["tierId"], "creditBalance": supplementary["creditBalance"]}), appendLog)
+	s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"buckets": buckets, "tierLabel": supplementary["tierLabel"], "tierId": supplementary["tierId"], "creditBalance": supplementary["creditBalance"]}))
 	return quotaDecision(account, used, len(buckets) > 0, settings.UsedPercentThreshold), status, nil
 }
 
@@ -1876,7 +1904,7 @@ func (s *accountInspectionScheduler) fetchGeminiCLISupplementary(ctx context.Con
 	return result
 }
 
-func (s *accountInspectionScheduler) inspectKimi(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings, appendLog func(string, string)) (accountInspectionDecision, *int, error) {
+func (s *accountInspectionScheduler) inspectKimi(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings) (accountInspectionDecision, *int, error) {
 	resp, err := s.withRetry(ctx, settings.Retries, func() (accountInspectionHTTPResult, error) {
 		return s.apiCall(ctx, account.Auth, http.MethodGet, "https://api.kimi.com/coding/v1/usages", map[string]string{"Authorization": "Bearer $TOKEN$"}, "", settings.Timeout)
 	})
@@ -1894,7 +1922,7 @@ func (s *accountInspectionScheduler) inspectKimi(ctx context.Context, account ac
 	if err != nil {
 		return accountInspectionDecision{}, status, err
 	}
-	s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"rows": rows}), appendLog)
+	s.persistQuotaState(ctx, account, quotaSuccessState(map[string]any{"rows": rows}))
 	return quotaDecision(account, used, len(rows) > 0, settings.UsedPercentThreshold), status, nil
 }
 
@@ -2093,26 +2121,19 @@ func (s *accountInspectionScheduler) applyManualActionResultLocked(result accoun
 	if result.Key == "" {
 		result.Key = accountInspectionKey(result.FileName, result.AuthIndex)
 	}
-	for index, current := range s.status.Results {
-		if current.Key == result.Key || (current.FileName == result.FileName && current.AuthIndex == result.AuthIndex) {
-			merged := current
-			merged.Provider = result.Provider
-			merged.FileName = result.FileName
-			merged.DisplayName = result.DisplayName
-			merged.Email = result.Email
-			merged.Name = result.Name
-			merged.AuthIndex = result.AuthIndex
-			merged.Disabled = result.Disabled
-			merged.Executed = result.Executed
-			merged.ExecuteError = result.ExecuteError
-			s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, current, -1)
-			s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, merged, 1)
-			s.status.Results[index] = merged
-			return
-		}
-	}
-	s.status.Summary = adjustAccountInspectionSummaryForResult(s.status.Summary, result, 1)
-	s.status.Results = append(s.status.Results, result)
+	s.updateInspectionResultLocked(result, true, func(current accountInspectionResult) (accountInspectionResult, bool) {
+		merged := current
+		merged.Provider = result.Provider
+		merged.FileName = result.FileName
+		merged.DisplayName = result.DisplayName
+		merged.Email = result.Email
+		merged.Name = result.Name
+		merged.AuthIndex = result.AuthIndex
+		merged.Disabled = result.Disabled
+		merged.Executed = result.Executed
+		merged.ExecuteError = result.ExecuteError
+		return merged, true
+	})
 }
 
 func (s *accountInspectionScheduler) executeManualActions(ctx context.Context, items []accountInspectionActionItem) []accountInspectionActionOutcome {
@@ -2195,7 +2216,7 @@ func summarizeManualActionOutcomes(outcomes []accountInspectionActionOutcome) gi
 	return gin.H{"total": len(outcomes), "success": success, "failed": failed}
 }
 
-func (s *accountInspectionScheduler) applyAutomaticActions(ctx context.Context, results []accountInspectionResult, settings accountInspectionSettings, appendLog func(string, string)) {
+func (s *accountInspectionScheduler) applyAutomaticActions(ctx context.Context, results []accountInspectionResult, settings accountInspectionSettings) {
 	workers := settings.DeleteWorkers
 	if workers <= 0 {
 		workers = settings.Workers
@@ -2221,7 +2242,7 @@ func (s *accountInspectionScheduler) applyAutomaticActions(ctx context.Context, 
 		mu.Lock()
 		if err != nil {
 			results[index].ExecuteError = err.Error()
-			appendLog("error", fmt.Sprintf("%s -> %s 执行失败：%s", resultIdentity(results[index]), action, err.Error()))
+			s.appendLog("error", fmt.Sprintf("%s -> %s 执行失败：%s", resultIdentity(results[index]), action, err.Error()))
 		} else {
 			results[index].Executed = true
 			results[index].Action = action
@@ -2231,27 +2252,44 @@ func (s *accountInspectionScheduler) applyAutomaticActions(ctx context.Context, 
 			if action == accountInspectionActionEnable {
 				results[index].Disabled = false
 			}
-			appendLog("success", fmt.Sprintf("%s %s 成功", resultIdentity(results[index]), action))
+			s.appendLog("success", fmt.Sprintf("%s %s 成功", resultIdentity(results[index]), action))
 		}
 		mu.Unlock()
 		return true
 	})
 }
 
-func autoActionForResult(result accountInspectionResult, settings accountInspectionSettings) accountInspectionAction {
+func accountInspectionAutoActionForError(result accountInspectionResult, action accountInspectionAction) accountInspectionAction {
+	if action == accountInspectionActionDelete {
+		return accountInspectionActionDelete
+	}
+	if action == accountInspectionActionDisable && !result.Disabled {
+		return accountInspectionActionDisable
+	}
+	return ""
+}
+
+func isAccountInspectionAccountInvalidResult(result accountInspectionResult) bool {
 	status := 0
 	if result.StatusCode != nil {
 		status = *result.StatusCode
 	}
-	accountError := !result.IsQuota && (result.Error != "" || isAccountErrorStatus(status) || status >= 400)
-	if accountError {
-		if settings.AutoExecuteAccountErrorAction == accountInspectionActionDelete {
-			return accountInspectionActionDelete
-		}
-		if settings.AutoExecuteAccountErrorAction == accountInspectionActionDisable && !result.Disabled {
-			return accountInspectionActionDisable
-		}
-		return ""
+	return !result.IsQuota && isAccountErrorStatus(status)
+}
+
+func isAccountInspectionRequestErrorResult(result accountInspectionResult) bool {
+	if result.IsQuota || result.Error == "" || isAccountInspectionAccountInvalidResult(result) {
+		return false
+	}
+	return true
+}
+
+func autoActionForResult(result accountInspectionResult, settings accountInspectionSettings) accountInspectionAction {
+	if isAccountInspectionAccountInvalidResult(result) {
+		return accountInspectionAutoActionForError(result, settings.AutoExecuteAccountInvalidAction)
+	}
+	if isAccountInspectionRequestErrorResult(result) {
+		return accountInspectionAutoActionForError(result, settings.AutoExecuteRequestErrorAction)
 	}
 	if result.Action == accountInspectionActionDisable && result.IsQuota && settings.AutoExecuteQuotaLimitDisable {
 		return accountInspectionActionDisable
@@ -2383,9 +2421,9 @@ func quotaSuccessState(values map[string]any) map[string]any {
 	return state
 }
 
-func (s *accountInspectionScheduler) persistQuotaState(ctx context.Context, account accountInspectionAccount, state map[string]any, appendLog func(string, string)) {
+func (s *accountInspectionScheduler) persistQuotaState(ctx context.Context, account accountInspectionAccount, state map[string]any) {
 	if err := persistQuotaState(ctx, account.Provider, account.FileName, state); err != nil {
-		appendLog("warning", fmt.Sprintf("%s 配额缓存写入失败：%s", account.identity(), err.Error()))
+		s.appendLog("warning", fmt.Sprintf("%s 配额缓存写入失败：%s", account.identity(), err.Error()))
 	}
 }
 
@@ -3598,6 +3636,7 @@ func (h *Handler) RefreshAccountInspectionToken(c *gin.Context) {
 	scheduler.mu.Lock()
 	if result.Key != "" {
 		scheduler.mergeTokenRefreshResultLocked(result)
+		scheduler.status.Results = sortAccountInspectionResults(scheduler.status.Results)
 	}
 	broadcast := scheduler.statusBroadcastLocked(true)
 	scheduler.mu.Unlock()

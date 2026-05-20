@@ -88,24 +88,28 @@ func (s *Server) RegisterGinRoutes(group *gin.RouterGroup) {
 	group.PUT("/model-prices", s.handleModelPricesPut)
 }
 
-func parseQueryBoundedInt64(c *gin.Context, key string, fallback int64, minValue int64) int64 {
+func parseQueryInt64(c *gin.Context, key string, fallback int64) int64 {
 	value := strings.TrimSpace(c.Query(key))
 	if value == "" {
 		return fallback
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || parsed < minValue {
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 	return parsed
 }
 
-func parseQueryInt64(c *gin.Context, key string, fallback int64) int64 {
-	return parseQueryBoundedInt64(c, key, fallback, 0)
-}
-
 func parseQueryInt(c *gin.Context, key string, fallback int) int {
-	return int(parseQueryBoundedInt64(c, key, int64(fallback), 1))
+	value := strings.TrimSpace(c.Query(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 func (s *Server) handleUsage(c *gin.Context) {
 	events, err := s.store.RecentEvents(c.Request.Context(), s.cfg.QueryLimit)
@@ -236,6 +240,8 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 	events := make([]internalusage.Event, 0)
 	var modelPrices map[string]ModelPrice
 	modelPriceRecords := 0
+	var quotaEntries []QuotaCacheEntry
+	quotaCacheRecords := 0
 	var accountInspectionSchedule json.RawMessage
 	accountInspectionScheduleRecords := 0
 	failed := 0
@@ -260,6 +266,14 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 			modelPriceRecords++
 			continue
 		}
+		if entries, ok, err := parseQuotaCacheImportRecord([]byte(line)); err != nil {
+			failed++
+			continue
+		} else if ok {
+			quotaEntries = append(quotaEntries, entries...)
+			quotaCacheRecords++
+			continue
+		}
 		event, err := internalusage.NormalizeRaw([]byte(line))
 		if err != nil {
 			failed++
@@ -282,6 +296,14 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 			return
 		}
 	}
+	if len(quotaEntries) > 0 {
+		for _, entry := range quotaEntries {
+			if err := s.store.SetQuotaCache(c.Request.Context(), entry); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
 	if accountInspectionSchedule != nil && accountInspectionScheduleImporter != nil {
 		if err := accountInspectionScheduleImporter(accountInspectionSchedule); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -295,6 +317,8 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 		"failed":                           failed,
 		"modelPrices":                      len(modelPrices),
 		"modelPriceRecords":                modelPriceRecords,
+		"quotaCache":                       len(quotaEntries),
+		"quotaCacheRecords":                quotaCacheRecords,
 		"accountInspectionSchedule":        accountInspectionSchedule != nil,
 		"accountInspectionScheduleRecords": accountInspectionScheduleRecords,
 	})
@@ -319,6 +343,24 @@ func parseAccountInspectionScheduleImportRecord(raw []byte) (json.RawMessage, bo
 		return nil, true, nil
 	}
 	return record.Schedule, true, nil
+}
+
+func parseQuotaCacheImportRecord(raw []byte) ([]QuotaCacheEntry, bool, error) {
+	var header struct {
+		RecordType string `json:"record_type"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return nil, false, err
+	}
+	if header.RecordType != quotaCacheExportRecordType {
+		return nil, false, nil
+	}
+
+	var record quotaCacheExportRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, true, err
+	}
+	return record.Entries, true, nil
 }
 
 func parseModelPricesImportRecord(raw []byte) (map[string]ModelPrice, bool, error) {

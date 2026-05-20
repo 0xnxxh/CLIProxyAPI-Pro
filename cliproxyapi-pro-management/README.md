@@ -113,7 +113,7 @@ Under the full management API prefix these are exposed by the backend as `/v0/ma
 - sidebar navigation labels and icon.
 - locale entries from `monitoring-locales.json`.
 - `usageStatisticsEnabled` and `clean` config types used by monitoring/account inspection.
-- `authFilesApi.patchFile`, `setStatusWithFallback`, and `deleteFileByName` helpers.
+- `authFilesApi.patchFile` and `setStatusWithFallback` helpers.
 - `accountInspection` service export.
 - `Select` `triggerClassName` and `dropdownClassName` props.
 - `maskSensitiveText` utility.

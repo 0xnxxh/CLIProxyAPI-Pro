@@ -578,7 +578,15 @@
       "account_inspection_deep_probe_quota": "Deep probe: quota unavailable",
       "account_inspection_deep_probe_auth_error": "Deep probe: auth error",
       "account_inspection_deep_probe_transient_error": "Deep probe temporary failure",
-      "account_inspection_deep_probe_skipped": "Deep probe skipped"
+      "account_inspection_deep_probe_skipped": "Deep probe skipped",
+      "account_inspection_account_invalid": "Invalid accounts",
+      "account_inspection_account_request_error": "Request errors",
+      "account_inspection_settings_auto_execute_account_invalid_action_label": "Invalid-account automatic action",
+      "account_inspection_settings_auto_execute_account_invalid_action_hint": "For accounts confirmed invalid by inspection HTTP 400/401/403/404, choose one automatic action. Disable and delete are mutually exclusive.",
+      "account_inspection_settings_auto_execute_request_error_action_label": "Request-error automatic action",
+      "account_inspection_settings_auto_execute_request_error_action_hint": "For accounts that look valid but fail during probe or Antigravity deep probe, choose one automatic action. Disable and delete are mutually exclusive.",
+      "account_inspection_account_invalid_action_short": "Invalid Action",
+      "account_inspection_request_error_action_short": "Request Error Action"
     },
     "usage_stats": {
       "title": "Usage Statistics",
@@ -614,6 +622,7 @@
       "export_success": "Usage export downloaded",
       "import_success": "Import complete: added {{added}}, skipped {{skipped}}, total {{total}}, failed {{failed}}",
       "import_model_prices_restored": "Model prices restored: {{count}}",
+      "import_quota_cache_restored": "Quota cache restored: {{count}}",
       "import_account_inspection_schedule_restored": "Account inspection settings restored",
       "import_invalid": "Invalid usage export file",
       "chart_line_label_1": "Line 1",
@@ -1268,7 +1277,15 @@
       "account_inspection_deep_probe_quota": "Глубокая проверка: квота недоступна",
       "account_inspection_deep_probe_auth_error": "Глубокая проверка: ошибка авторизации",
       "account_inspection_deep_probe_transient_error": "Временный сбой глубокой проверки",
-      "account_inspection_deep_probe_skipped": "Глубокая проверка пропущена"
+      "account_inspection_deep_probe_skipped": "Глубокая проверка пропущена",
+      "account_inspection_account_invalid": "Недействительные аккаунты",
+      "account_inspection_account_request_error": "Ошибки запросов",
+      "account_inspection_settings_auto_execute_account_invalid_action_label": "Автодействие для недействительных аккаунтов",
+      "account_inspection_settings_auto_execute_account_invalid_action_hint": "Для аккаунтов, подтвержденно недействительных по HTTP 400/401/403/404 при проверке, выберите одно автодействие. Отключение и удаление взаимоисключающие.",
+      "account_inspection_settings_auto_execute_request_error_action_label": "Автодействие при ошибке запроса",
+      "account_inspection_settings_auto_execute_request_error_action_hint": "Для аккаунтов, которые выглядят действительными, но падают при пробе или глубокой проверке Antigravity, выберите одно автодействие. Отключение и удаление взаимоисключающие.",
+      "account_inspection_account_invalid_action_short": "Действие при недействительности",
+      "account_inspection_request_error_action_short": "Действие при ошибке запроса"
     },
     "usage_stats": {
       "title": "Статистика использования",
@@ -1304,6 +1321,7 @@
       "export_success": "Экспорт использования скачан",
       "import_success": "Импорт завершён: добавлено {{added}}, пропущено {{skipped}}, всего {{total}}, ошибок {{failed}}",
       "import_model_prices_restored": "Цены моделей восстановлены: {{count}}",
+      "import_quota_cache_restored": "Кэш квот восстановлен: {{count}}",
       "import_account_inspection_schedule_restored": "Настройки проверки аккаунтов восстановлены",
       "import_invalid": "Недопустимый файл экспорта использования",
       "chart_line_label_1": "Линия 1",
@@ -1958,7 +1976,15 @@
       "account_inspection_deep_probe_quota": "深度检测：额度不可用",
       "account_inspection_deep_probe_auth_error": "深度检测：授权异常",
       "account_inspection_deep_probe_transient_error": "深度检测临时失败",
-      "account_inspection_deep_probe_skipped": "深度检测已跳过"
+      "account_inspection_deep_probe_skipped": "深度检测已跳过",
+      "account_inspection_account_invalid": "账号失效",
+      "account_inspection_account_request_error": "账号异常",
+      "account_inspection_settings_auto_execute_account_invalid_action_label": "账号失效自动操作",
+      "account_inspection_settings_auto_execute_account_invalid_action_hint": "巡检确认 HTTP 400/401/403/404 的账号失效时，可选择一种自动操作；禁用与删除二选一。",
+      "account_inspection_settings_auto_execute_request_error_action_label": "账号异常自动操作",
+      "account_inspection_settings_auto_execute_request_error_action_hint": "账号看起来正常但探测请求或 Antigravity 深度检测失败时，可选择一种自动操作；禁用与删除二选一。",
+      "account_inspection_account_invalid_action_short": "账号失效操作",
+      "account_inspection_request_error_action_short": "账号异常操作"
     },
     "usage_stats": {
       "title": "使用统计",
@@ -1994,6 +2020,7 @@
       "export_success": "使用统计已导出",
       "import_success": "导入完成：新增 {{added}}，跳过 {{skipped}}，总请求 {{total}}，失败 {{failed}}",
       "import_model_prices_restored": "模型价格已恢复：{{count}} 个",
+      "import_quota_cache_restored": "额度缓存已恢复：{{count}} 条",
       "import_account_inspection_schedule_restored": "账号巡检设置已恢复",
       "import_invalid": "导入文件格式不正确",
       "chart_line_label_1": "曲线 1",
@@ -2648,7 +2675,15 @@
       "account_inspection_deep_probe_quota": "深度檢測：額度不可用",
       "account_inspection_deep_probe_auth_error": "深度檢測：授權異常",
       "account_inspection_deep_probe_transient_error": "深度檢測暫時失敗",
-      "account_inspection_deep_probe_skipped": "深度檢測已跳過"
+      "account_inspection_deep_probe_skipped": "深度檢測已跳過",
+      "account_inspection_account_invalid": "帳號失效",
+      "account_inspection_account_request_error": "帳號異常",
+      "account_inspection_settings_auto_execute_account_invalid_action_label": "帳號失效自動動作",
+      "account_inspection_settings_auto_execute_account_invalid_action_hint": "巡檢確認 HTTP 400/401/403/404 的帳號失效時，可選擇一種自動動作；禁用與刪除二選一。",
+      "account_inspection_settings_auto_execute_request_error_action_label": "帳號異常自動動作",
+      "account_inspection_settings_auto_execute_request_error_action_hint": "帳號看似正常但探測請求或 Antigravity 深度檢測失敗時，可選擇一種自動動作；禁用與刪除二選一。",
+      "account_inspection_account_invalid_action_short": "帳號失效動作",
+      "account_inspection_request_error_action_short": "帳號異常動作"
     },
     "usage_stats": {
       "title": "使用統計",
@@ -2684,6 +2719,7 @@
       "export_success": "使用統計已匯出",
       "import_success": "匯入完成：新增 {{added}}，跳過 {{skipped}}，總請求 {{total}}，失敗 {{failed}}",
       "import_model_prices_restored": "模型價格已恢復：{{count}} 個",
+      "import_quota_cache_restored": "額度快取已恢復：{{count}} 筆",
       "import_account_inspection_schedule_restored": "帳號巡檢設定已恢復",
       "import_invalid": "匯入檔案格式不正確",
       "chart_line_label_1": "曲線 1",

@@ -177,11 +177,18 @@ insert_before(
 )
 
 server = ROOT / 'internal/api/server.go'
+auth_files = ROOT / 'internal/api/handlers/management/auth_files.go'
 management_scheduler = ROOT / 'internal/api/handlers/management/account_inspection_scheduler.go'
 scheduler_source = Path('/tmp/account_inspection_scheduler.go')
 if not scheduler_source.is_file():
     scheduler_source = Path(__file__).resolve().parent / 'account_inspection_scheduler.go'
 management_scheduler.write_text(re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, scheduler_source.read_text()))
+replace_once(
+    auth_files,
+    '''\t\t\"unavailable\":    auth.Unavailable,\n\t\t\"runtime_only\":   runtimeOnly,\n''',
+    '''\t\t\"unavailable\":    auth.Unavailable,\n\t\t\"last_error\":     auth.LastError,\n\t\t\"runtime_only\":   runtimeOnly,\n''',
+)
+
 rewrite_module_imports(ROOT / 'internal/embeddedusage/server.go')
 rewrite_module_imports(ROOT / 'internal/embeddedusage/service.go')
 rewrite_module_imports(ROOT / 'internal/embeddedusage/store.go')

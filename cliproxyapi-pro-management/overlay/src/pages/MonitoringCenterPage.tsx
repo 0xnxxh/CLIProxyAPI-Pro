@@ -303,6 +303,8 @@ type UsageImportResult = {
   failed?: number;
   modelPrices?: number;
   modelPriceRecords?: number;
+  quotaCache?: number;
+  quotaCacheRecords?: number;
   accountInspectionSchedule?: boolean;
   accountInspectionScheduleRecords?: number;
 };
@@ -336,12 +338,6 @@ const getRankingSummaryLabel = (metric: RankingMetric, t: TFunction) => {
   if (metric === 'cost') return t('monitoring.ranking_summary_cost');
   if (metric === 'tokens') return t('monitoring.ranking_summary_tokens');
   return t('monitoring.ranking_summary_calls');
-};
-
-const getRankingMetricTotalFromRows = (rows: MonitoringEventRow[], metric: RankingMetric) => {
-  if (metric === 'cost') return rows.reduce((sum, row) => sum + row.totalCost, 0);
-  if (metric === 'tokens') return rows.reduce((sum, row) => sum + row.totalTokens, 0);
-  return rows.reduce((sum, row) => sum + (row.statsIncluded ? 1 : 0), 0);
 };
 
 const formatRankingMetricValue = (value: number, metric: RankingMetric, hasPrices: boolean) => {
@@ -504,12 +500,6 @@ type AccountSummaryMetric = {
 };
 
 const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
-
-const filterRowsByRange = (rows: MonitoringEventRow[], range: MonitoringTimeRange) => {
-  const nowMs = Date.now();
-  const startMs = getRangeStartMs(range, nowMs);
-  return rows.filter((row) => row.timestampMs >= startMs && row.timestampMs <= nowMs);
-};
 
 const getProgressWidth = (value: number) => {
   if (value <= 0) return '0%';
@@ -2418,6 +2408,7 @@ export function MonitoringCenterPage() {
         });
         const importedExtras = [
           (result.modelPriceRecords ?? 0) > 0 ? t('usage_stats.import_model_prices_restored', { count: result.modelPrices ?? 0 }) : '',
+          (result.quotaCacheRecords ?? 0) > 0 ? t('usage_stats.import_quota_cache_restored', { count: result.quotaCache ?? 0 }) : '',
           result.accountInspectionSchedule ? t('usage_stats.import_account_inspection_schedule_restored') : '',
         ].filter(Boolean).join(' · ');
         showNotification(
@@ -2536,35 +2527,39 @@ export function MonitoringCenterPage() {
     [filteredRows, selectedApiKey, selectedModel, selectedProvider, selectedStatus]
   );
 
-  const topStatsRows = useMemo(() => allRows.filter((row) => row.statsIncluded), [allRows]);
-  const todayStatsRows = useMemo(
-    () => filterRowsByRange(topStatsRows, 'today'),
-    [topStatsRows]
-  );
-  const trendStatsRows = useMemo(
-    () => filterRowsByRange(topStatsRows, timeRange),
-    [topStatsRows, timeRange]
-  );
-  const todayCost = useMemo(() => {
-    const todayStart = new Date();
+  const usageRowGroups = useMemo(() => {
+    const nowMs = Date.now();
+    const todayStart = new Date(nowMs);
     todayStart.setHours(0, 0, 0, 0);
     const tomorrowStart = new Date(todayStart);
     tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-    return topStatsRows.reduce(
-      (sum, row) => sum + (row.timestampMs >= todayStart.getTime() && row.timestampMs < tomorrowStart.getTime() ? row.totalCost : 0),
-      0
-    );
-  }, [topStatsRows]);
-  const yesterdayCost = useMemo(() => {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
     const yesterdayStart = new Date(todayStart);
     yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-    return topStatsRows.reduce(
-      (sum, row) => sum + (row.timestampMs >= yesterdayStart.getTime() && row.timestampMs < todayStart.getTime() ? row.totalCost : 0),
-      0
-    );
-  }, [topStatsRows]);
+    const trendStartMs = getRangeStartMs(timeRange, nowMs);
+    const topStatsRows: MonitoringEventRow[] = [];
+    const todayStatsRows: MonitoringEventRow[] = [];
+    const trendStatsRows: MonitoringEventRow[] = [];
+    let todayCost = 0;
+    let yesterdayCost = 0;
+
+    allRows.forEach((row) => {
+      if (!row.statsIncluded) return;
+      topStatsRows.push(row);
+      if (row.timestampMs >= todayStart.getTime() && row.timestampMs < tomorrowStart.getTime()) {
+        todayStatsRows.push(row);
+        todayCost += row.totalCost;
+      } else if (row.timestampMs >= yesterdayStart.getTime() && row.timestampMs < todayStart.getTime()) {
+        yesterdayCost += row.totalCost;
+      }
+      if (row.timestampMs >= trendStartMs && row.timestampMs <= nowMs) {
+        trendStatsRows.push(row);
+      }
+    });
+
+    return { topStatsRows, todayStatsRows, trendStatsRows, todayCost, yesterdayCost };
+  }, [allRows, timeRange]);
+  const { topStatsRows, todayStatsRows, trendStatsRows, todayCost, yesterdayCost } = usageRowGroups;
+
   const usageTrendApiKeyOptions = useMemo(() => buildApiKeyFilterOptions(trendStatsRows, t('monitoring.filter_all_api_keys')), [trendStatsRows, t]);
   const usageTrendScopedRows = useMemo(
     () => usageTrendApiKey === 'all'
@@ -2583,36 +2578,59 @@ export function MonitoringCenterPage() {
   const trendSummary = useMemo(() => buildMonitoringSummary(trendStatsRows), [trendStatsRows]);
   const topSummary = useMemo(() => buildMonitoringSummary(topStatsRows), [topStatsRows]);
   const todaySummary = useMemo(() => buildMonitoringSummary(todayStatsRows), [todayStatsRows]);
+  const rankingData = useMemo(() => {
+    const modelRows = buildAccountRows({ rows: usageTrendScopedRows, groupBy: 'model' });
+    const apiKeyRows = buildAccountRows({ rows: trendStatsRows, groupBy: 'apiKey' });
+    const totals = {
+      scoped: {
+        requests: 0,
+        tokens: 0,
+        cost: 0,
+      },
+      trend: {
+        requests: 0,
+        tokens: 0,
+        cost: 0,
+      },
+    };
+
+    usageTrendScopedRows.forEach((row) => {
+      totals.scoped.requests += row.statsIncluded ? 1 : 0;
+      totals.scoped.tokens += row.totalTokens;
+      totals.scoped.cost += row.totalCost;
+    });
+    trendStatsRows.forEach((row) => {
+      totals.trend.requests += row.statsIncluded ? 1 : 0;
+      totals.trend.tokens += row.totalTokens;
+      totals.trend.cost += row.totalCost;
+    });
+
+    return { modelRows, apiKeyRows, totals };
+  }, [trendStatsRows, usageTrendScopedRows]);
   const modelRankingRows = useMemo(
-    () => [...buildAccountRows(usageTrendScopedRows, 'model')]
+    () => [...rankingData.modelRows]
       .sort((left, right) => (
         getRankingMetricValue(right, modelRankingMetric) - getRankingMetricValue(left, modelRankingMetric)
         || right.totalTokens - left.totalTokens
         || right.totalCalls - left.totalCalls
       )),
-    [modelRankingMetric, usageTrendScopedRows]
+    [modelRankingMetric, rankingData.modelRows]
   );
-  const modelRankingMetricTotal = useMemo(
-    () => getRankingMetricTotalFromRows(usageTrendScopedRows, modelRankingMetric),
-    [modelRankingMetric, usageTrendScopedRows]
-  );
+  const modelRankingMetricTotal = rankingData.totals.scoped[modelRankingMetric];
   const apiKeyRankingRows = useMemo(
-    () => [...buildAccountRows(trendStatsRows, 'apiKey')]
+    () => [...rankingData.apiKeyRows]
       .sort((left, right) => (
         getRankingMetricValue(right, apiKeyRankingMetric) - getRankingMetricValue(left, apiKeyRankingMetric)
         || right.totalCalls - left.totalCalls
         || right.totalCost - left.totalCost
       ))
       .slice(0, 8),
-    [apiKeyRankingMetric, trendStatsRows]
+    [apiKeyRankingMetric, rankingData.apiKeyRows]
   );
-  const apiKeyRankingMetricTotal = useMemo(
-    () => getRankingMetricTotalFromRows(trendStatsRows, apiKeyRankingMetric),
-    [apiKeyRankingMetric, trendStatsRows]
-  );
+  const apiKeyRankingMetricTotal = rankingData.totals.trend[apiKeyRankingMetric];
   const accountStatsFilteredRows = trendStatsRows;
   const accountStatsRows = useMemo(
-    () => [...buildAccountRows(accountStatsFilteredRows, 'account', { includeRows: true })]
+    () => [...buildAccountRows({ rows: accountStatsFilteredRows, groupBy: 'account', includeRows: true })]
       .sort((left, right) => (
         getAccountSortValue(right, accountStatsMetric) - getAccountSortValue(left, accountStatsMetric)
         || right.lastSeenAt - left.lastSeenAt

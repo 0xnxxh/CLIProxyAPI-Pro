@@ -35,7 +35,8 @@ export interface AccountInspectionConfigurableSettings {
   antigravityQuotaMode: AccountInspectionAntigravityQuotaMode;
   autoExecuteQuotaLimitDisable: boolean;
   autoExecuteQuotaRecoveryEnable: boolean;
-  autoExecuteAccountErrorAction: AccountInspectionAutoErrorAction;
+  autoExecuteAccountInvalidAction: AccountInspectionAutoErrorAction;
+  autoExecuteRequestErrorAction: AccountInspectionAutoErrorAction;
 }
 
 export interface AccountInspectionAccount {
@@ -226,7 +227,8 @@ export const DEFAULT_ACCOUNT_INSPECTION_SETTINGS: AccountInspectionConfigurableS
   antigravityQuotaMode: 'claude-gpt',
   autoExecuteQuotaLimitDisable: false,
   autoExecuteQuotaRecoveryEnable: false,
-  autoExecuteAccountErrorAction: 'none',
+  autoExecuteAccountInvalidAction: 'none',
+  autoExecuteRequestErrorAction: 'none',
 };
 
 type IntegerBounds = {
@@ -327,7 +329,8 @@ const readConfigurableSettingsFromConfig = (
     sampleSize: normalizeNumberValue(clean?.sampleSize) ?? undefined,
     autoExecuteQuotaLimitDisable: undefined,
     autoExecuteQuotaRecoveryEnable: undefined,
-    autoExecuteAccountErrorAction: undefined,
+    autoExecuteAccountInvalidAction: undefined,
+    autoExecuteRequestErrorAction: undefined,
     antigravityDeepProbeEnabled: undefined,
     antigravityDeepProbeModel: undefined,
     antigravityQuotaMode: undefined,
@@ -394,7 +397,12 @@ const normalizeConfigurableSettings = (
     antigravityDeepProbeModel: readStringValue(merged.antigravityDeepProbeModel) ||
       DEFAULT_ACCOUNT_INSPECTION_SETTINGS.antigravityDeepProbeModel,
     antigravityQuotaMode: normalizeAntigravityQuotaMode(merged.antigravityQuotaMode),
-    autoExecuteAccountErrorAction: normalizeAutoErrorAction(merged.autoExecuteAccountErrorAction),
+    autoExecuteAccountInvalidAction: normalizeAutoErrorAction(
+      merged.autoExecuteAccountInvalidAction ?? (merged as { autoExecuteAccountErrorAction?: unknown }).autoExecuteAccountErrorAction
+    ),
+    autoExecuteRequestErrorAction: normalizeAutoErrorAction(
+      merged.autoExecuteRequestErrorAction ?? (merged as { autoExecuteAccountErrorAction?: unknown }).autoExecuteAccountErrorAction
+    ),
   };
 };
 
@@ -574,7 +582,7 @@ const buildAccountInspectionBackendRunResult = (
 ): AccountInspectionRunResult | null => {
   if (results.length === 0 && response.status.lastFinishedAt <= 0) return null;
 
-  const settings = response.schedule.settings;
+  const settings = normalizeConfigurableSettings(response.schedule.settings);
   return {
     results,
     summary: {
@@ -592,7 +600,7 @@ export const buildAccountInspectionBackendViewState = (
   response: AccountInspectionBackendResponse,
   now = Date.now()
 ) => {
-  const settings = response.schedule.settings;
+  const settings = normalizeConfigurableSettings(response.schedule.settings);
   const startedAt = response.status.lastStartedAt || now;
   const finishedAt = response.status.lastFinishedAt || startedAt;
   const results = (response.status.results ?? []).map(accountInspectionBackendResultToItem);
@@ -648,7 +656,8 @@ export const isSuggestedAction = (item: AccountInspectionResultItem) => item.act
 export const hasAccountInspectionAutoExecutePolicies = (settings: AccountInspectionConfigurableSettings) =>
   settings.autoExecuteQuotaLimitDisable ||
   settings.autoExecuteQuotaRecoveryEnable ||
-  settings.autoExecuteAccountErrorAction !== 'none';
+  settings.autoExecuteAccountInvalidAction !== 'none' ||
+  settings.autoExecuteRequestErrorAction !== 'none';
 
 export const applyAccountInspectionExecutionResult = (
   previousResult: AccountInspectionRunResult,

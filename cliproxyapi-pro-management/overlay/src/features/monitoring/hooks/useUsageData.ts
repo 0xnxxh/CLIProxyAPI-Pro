@@ -31,6 +31,12 @@ export interface UseUsageDataReturn {
 
 const toNumber = (value: unknown) => (Number.isFinite(Number(value)) ? Number(value) : 0);
 
+type UsageModelEntry = { details?: unknown[]; [key: string]: unknown };
+type UsageApiEntry = { models?: Record<string, UsageModelEntry>; [key: string]: unknown };
+
+const asUsageApiEntry = (value: unknown): UsageApiEntry =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as UsageApiEntry) : {};
+
 const mergeUsagePayload = (current: UsagePayload | null, next: UsagePayload | null): UsagePayload | null => {
   if (!next) return current;
   if (!current) return next;
@@ -39,13 +45,13 @@ const mergeUsagePayload = (current: UsagePayload | null, next: UsagePayload | nu
   const nextLatestId = toNumber(next.latest_id);
   if (nextLatestId <= currentLatestId) return current;
 
-  const mergedApis: Record<string, unknown> = { ...(current.apis ?? {}) };
+  let mergedApis = current.apis;
   Object.entries(next.apis ?? {}).forEach(([endpoint, apiEntry]) => {
-    const existingApi = mergedApis[endpoint] as { models?: Record<string, { details?: unknown[] }> } | undefined;
-    const nextApi = apiEntry as { models?: Record<string, { details?: unknown[] }> } | undefined;
-    const models: Record<string, { details?: unknown[] }> = { ...(existingApi?.models ?? {}) };
+    const existingApi = asUsageApiEntry(current.apis?.[endpoint]);
+    const nextApi = asUsageApiEntry(apiEntry);
+    const models: Record<string, UsageModelEntry> = { ...(existingApi.models ?? {}) };
 
-    Object.entries(nextApi?.models ?? {}).forEach(([model, modelEntry]) => {
+    Object.entries(nextApi.models ?? {}).forEach(([model, modelEntry]) => {
       const existingModel = models[model];
       models[model] = {
         ...(existingModel ?? {}),
@@ -57,9 +63,11 @@ const mergeUsagePayload = (current: UsagePayload | null, next: UsagePayload | nu
       };
     });
 
-    mergedApis[endpoint] = {
-      ...(existingApi ?? {}),
-      ...(nextApi ?? {}),
+    const writableApis: Record<string, unknown> = mergedApis === current.apis ? { ...(current.apis ?? {}) } : (mergedApis ?? {});
+    mergedApis = writableApis;
+    writableApis[endpoint] = {
+      ...existingApi,
+      ...nextApi,
       models,
     };
   });

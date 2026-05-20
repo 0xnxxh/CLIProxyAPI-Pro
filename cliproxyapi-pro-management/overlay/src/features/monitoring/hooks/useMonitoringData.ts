@@ -717,12 +717,15 @@ export const buildMonitoringSummary = (rows: MonitoringEventRow[]): MonitoringSu
   };
 };
 
-export const buildAccountRows = (
-  rows: MonitoringEventRow[],
-  groupBy: MonitoringAccountGroupBy = 'account',
-  options: { includeRows?: boolean } = {}
-): MonitoringAccountRow[] => {
-  const includeRows = options.includeRows === true;
+export const buildAccountRows = ({
+  rows,
+  groupBy = 'account',
+  includeRows = false,
+}: {
+  rows: MonitoringEventRow[];
+  groupBy?: MonitoringAccountGroupBy;
+  includeRows?: boolean;
+}): MonitoringAccountRow[] => {
   const grouped = new Map<
     string,
     {

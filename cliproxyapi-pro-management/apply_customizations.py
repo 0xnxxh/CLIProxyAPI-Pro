@@ -269,11 +269,6 @@ def patch_supporting_api_and_types(target: Path) -> None:
         "  setStatus: (name: string, disabled: boolean) =>\n    apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),\n\n  patchFields:",
         "  setStatus: (name: string, disabled: boolean) =>\n    apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),\n\n  setStatusWithFallback: async (name: string, disabled: boolean) => {\n    try {\n      return await authFilesApi.patchFile({ name, disabled });\n    } catch {\n      return authFilesApi.setStatus(name, disabled);\n    }\n  },\n\n  patchFields:",
     )
-    replace_once(
-        auth_files_path,
-        "  deleteFile: (name: string) => authFilesApi.deleteFiles([name]),\n\n",
-        "  deleteFile: (name: string) => authFilesApi.deleteFiles([name]),\n\n  deleteFileByName: (name: string) => authFilesApi.deleteFiles([name]),\n\n",
-    )
 
     api_index_path = target / 'src/services/api/index.ts'
     replace_once(
