@@ -36,7 +36,7 @@ import { apiClient } from '@/services/api/client';
 import { useAuthStore, useConfigStore, useNotificationStore, useQuotaStore } from '@/stores';
 import type { AuthFileItem } from '@/types';
 import { maskSensitiveText } from '@/utils/format';
-import { getStatusFromError } from '@/utils/quota';
+import { getStatusFromError, isAntigravityFile, isClaudeFile, isCodexFile, isGeminiCliFile, isKimiFile, isRuntimeOnlyAuthFile } from '@/utils/quota';
 import { formatCompactNumber, formatDurationMs, formatUsd, normalizeAuthIndex, type ModelPrice } from '@/utils/usage';
 import {
   ANTIGRAVITY_CONFIG,
@@ -723,14 +723,6 @@ const buildRealtimeMetaText = (row: MonitoringEventRow) => {
   return maskSensitiveText(text || '-');
 };
 
-const QUOTA_CONFIGS: AnyQuotaConfig[] = [
-  ANTIGRAVITY_CONFIG,
-  CLAUDE_CONFIG,
-  CODEX_CONFIG,
-  GEMINI_CLI_CONFIG,
-  KIMI_CONFIG,
-] as AnyQuotaConfig[];
-
 const QUOTA_RENDER_HELPERS: QuotaRenderHelpers = {
   styles: quotaStyles,
   QuotaProgressBar,
@@ -741,6 +733,15 @@ const getQuotaProviderLabel = (config: AnyQuotaConfig, t: TFunction) => {
   const translated = t(titleKey);
   if (translated !== titleKey) return translated;
   return config.type;
+};
+
+const getAccountQuotaConfig = (file: AuthFileItem): AnyQuotaConfig | undefined => {
+  if (isAntigravityFile(file)) return ANTIGRAVITY_CONFIG;
+  if (isClaudeFile(file)) return CLAUDE_CONFIG;
+  if (isCodexFile(file)) return CODEX_CONFIG;
+  if (isGeminiCliFile(file) && !isRuntimeOnlyAuthFile(file)) return GEMINI_CLI_CONFIG;
+  if (isKimiFile(file)) return KIMI_CONFIG;
+  return undefined;
 };
 
 const resolveQuotaErrorMessage = (t: TFunction, quota?: QuotaStatusState): string => {
@@ -789,7 +790,7 @@ const buildAccountQuotaTargetsByAccount = (
     const file = authFilesByAuthIndex.get(authIndex);
     if (!file) return;
 
-    const quotaConfig = QUOTA_CONFIGS.find((item) => item.filterFn(file));
+    const quotaConfig = getAccountQuotaConfig(file);
     if (!quotaConfig) return;
 
     const dedupeKey = `${quotaConfig.type}::${authIndex}::${file.name}`;
@@ -3195,7 +3196,7 @@ export function MonitoringCenterPage() {
               </tr>
             </thead>
             <tbody>
-              {realtimeLogRows.slice(0, 150).map((row) => (
+              {realtimeLogRows.map((row) => (
                 <tr key={row.id} className={row.failed ? styles.logRowFailed : undefined}>
                   <td>
                     <div className={styles.primaryCell}>

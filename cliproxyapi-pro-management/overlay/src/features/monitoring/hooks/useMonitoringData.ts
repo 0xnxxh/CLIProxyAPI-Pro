@@ -513,6 +513,15 @@ const looksLikeAuthFileName = (value: string) => /_oauth_creds\.json$/i.test(val
 
 const normalizeProviderLabel = (value: string) => value.trim().toLowerCase().replace(/[_\s]+/g, '-');
 
+const isWeakAuthDisplayValue = (value: string, authIndex: string, providerLabel: string) => {
+  if (!value) return true;
+  if (looksLikeAuthFileName(value)) return true;
+  const normalized = normalizeProviderLabel(value);
+  return normalized === providerLabel ||
+    normalized === `${providerLabel}-oauth-creds-json` ||
+    normalizeAuthIndex(value) === authIndex;
+};
+
 const resolveAuthDisplayName = (entry: AuthFileItem, authIndex: string) => {
   const provider = readStringValue(entry.provider) || readStringValue(entry.type);
   const providerLabel = normalizeProviderLabel(provider);
@@ -522,13 +531,14 @@ const resolveAuthDisplayName = (entry: AuthFileItem, authIndex: string) => {
   const account = readStringValue(entry.account) || readNestedString(entry, ['id_token', 'account']);
   const username = readNestedString(entry, ['id_token', 'preferred_username']);
   const subject = readNestedString(entry, ['id_token', 'sub']);
-  const fallback = [email, account, username, label, name, subject, authIndex].find((value) => {
-    if (!value || looksLikeAuthFileName(value)) return false;
-    const normalized = normalizeProviderLabel(value);
-    return normalized !== providerLabel && normalized !== `${providerLabel}-oauth-creds-json`;
-  });
+  const fallback = [email, account, username, label, subject].find(
+    (value) => !isWeakAuthDisplayValue(value, authIndex, providerLabel)
+  );
 
-  return fallback || label || authIndex;
+  if (fallback) return fallback;
+  if (name && normalizeAuthIndex(name) !== authIndex) return name;
+  if (label && normalizeAuthIndex(label) !== authIndex) return label;
+  return resolveProviderDisplayLabel(provider) || authIndex;
 };
 
 const normalizeAuthMeta = (entry: AuthFileItem): MonitoringAuthMeta | null => {
@@ -544,11 +554,16 @@ const normalizeAuthMeta = (entry: AuthFileItem): MonitoringAuthMeta | null => {
   const provider = readStringValue(entry.provider) || readStringValue(entry.type) || '-';
   const email = readStringValue(entry.email) || readNestedString(entry, ['id_token', 'email']);
   const name = readStringValue(entry.name);
+  const account = email ||
+    readStringValue(entry.account) ||
+    readNestedString(entry, ['id_token', 'account']) ||
+    (name && normalizeAuthIndex(name) !== authIndex ? name : '') ||
+    (label && normalizeAuthIndex(label) !== authIndex ? label : '');
 
   return {
     authIndex,
     label,
-    account: email || name || '-',
+    account: account || provider || '-',
     provider,
     status: readStringValue(entry.status) || 'unknown',
     disabled: readBooleanValue(entry.disabled),
