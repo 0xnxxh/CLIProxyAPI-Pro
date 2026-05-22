@@ -587,7 +587,8 @@
       "account_inspection_settings_auto_execute_request_error_action_label": "Request-error automatic action",
       "account_inspection_settings_auto_execute_request_error_action_hint": "For accounts that look valid but fail during probe or Antigravity deep probe, choose one automatic action. Disable and delete are mutually exclusive.",
       "account_inspection_account_invalid_action_short": "Invalid Action",
-      "account_inspection_request_error_action_short": "Request Error Action"
+      "account_inspection_request_error_action_short": "Request Error Action",
+      "deleted_credential": "Deleted credential"
     },
     "usage_stats": {
       "title": "Usage Statistics",
@@ -1306,7 +1307,8 @@
       "account_inspection_settings_auto_execute_request_error_action_label": "Автодействие при ошибке запроса",
       "account_inspection_settings_auto_execute_request_error_action_hint": "Для аккаунтов, которые выглядят действительными, но падают при пробе или глубокой проверке Antigravity, выберите одно автодействие. Отключение и удаление взаимоисключающие.",
       "account_inspection_account_invalid_action_short": "Действие при недействительности",
-      "account_inspection_request_error_action_short": "Действие при ошибке запроса"
+      "account_inspection_request_error_action_short": "Действие при ошибке запроса",
+      "deleted_credential": "Удалённые учётные данные"
     },
     "usage_stats": {
       "title": "Статистика использования",
@@ -2025,7 +2027,8 @@
       "account_inspection_settings_auto_execute_request_error_action_label": "账号异常自动操作",
       "account_inspection_settings_auto_execute_request_error_action_hint": "账号看起来正常但探测请求或 Antigravity 深度检测失败时，可选择一种自动操作；禁用与删除二选一。",
       "account_inspection_account_invalid_action_short": "账号失效操作",
-      "account_inspection_request_error_action_short": "账号异常操作"
+      "account_inspection_request_error_action_short": "账号异常操作",
+      "deleted_credential": "已删除凭证"
     },
     "usage_stats": {
       "title": "使用统计",
@@ -2744,7 +2747,8 @@
       "account_inspection_settings_auto_execute_request_error_action_label": "帳號異常自動動作",
       "account_inspection_settings_auto_execute_request_error_action_hint": "帳號看似正常但探測請求或 Antigravity 深度檢測失敗時，可選擇一種自動動作；禁用與刪除二選一。",
       "account_inspection_account_invalid_action_short": "帳號失效動作",
-      "account_inspection_request_error_action_short": "帳號異常動作"
+      "account_inspection_request_error_action_short": "帳號異常動作",
+      "deleted_credential": "已刪除憑證"
     },
     "usage_stats": {
       "title": "使用統計",

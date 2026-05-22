@@ -56,6 +56,8 @@ export const getRangeStartMs = (range: MonitoringTimeRange, nowMs: number) => {
   }
 };
 
+const DELETED_CREDENTIAL_FALLBACK_LABEL = 'Deleted credential';
+
 const maskEmailLike = (value: string) => {
   const trimmed = value.trim();
   const match = trimmed.match(/^([^@\s]{1,3})[^@\s]*@(.+)$/);
@@ -296,7 +298,7 @@ export type MonitoringEventRow = {
   planType: string;
   channel: string;
   channelHost: string;
-  channelDisabled: boolean;
+  credentialDeleted: boolean;
   failed: boolean;
   statsIncluded: boolean;
   latencyMs: number | null;
@@ -420,6 +422,7 @@ export interface UseMonitoringDataParams {
   modelPrices: Record<string, ModelPrice>;
   timeRange: MonitoringTimeRange;
   searchQuery: string;
+  deletedCredentialLabel?: string;
 }
 
 export interface UseMonitoringDataReturn {
@@ -825,8 +828,13 @@ export const buildAccountRows = ({
       };
     }
     const accountKey = row.account || row.authLabel || row.source;
+    const deletedCredentialKey = row.credentialDeleted && row.authIndex !== '-'
+      ? `::${row.authIndex}`
+      : '';
     const channelKey = row.channel && row.channel !== '-' ? row.channel : '';
-    const groupId = channelKey ? `account:${accountKey}::${channelKey}` : `account:${accountKey}`;
+    const groupId = channelKey
+      ? `account:${accountKey}${deletedCredentialKey}::${channelKey}`
+      : `account:${accountKey}${deletedCredentialKey}`;
     return {
       id: groupId,
       account: row.account,
@@ -1441,7 +1449,8 @@ const buildEventRows = (
   sourceInfoMap: ReturnType<typeof buildSourceInfoMap>,
   channelByAuthIndex: Map<string, MonitoringChannelMeta>,
   configuredApiKeys: ReturnType<typeof buildConfiguredApiKeyMap>,
-  modelPrices: Record<string, ModelPrice>
+  modelPrices: Record<string, ModelPrice>,
+  deletedCredentialLabel: string
 ) =>
   details
     .map((detail, index) => {
@@ -1456,9 +1465,19 @@ const buildEventRows = (
       const authIndex = normalizeAuthIndex(detail.auth_index) ?? '-';
       const authMeta = authMetaMap.get(authIndex);
       const sourceMeta = resolveSourceDisplay(detail.source, detail.auth_index, sourceInfoMap, authFileMap);
-      const sourceLabel = authMeta?.label || sourceMeta.displayName || authIndex;
+      const hasAuthIndex = authIndex !== '-';
+      const hasKnownAuthIndex = hasAuthIndex && (
+        authMetaMap.has(authIndex) ||
+        authFileMap.has(authIndex) ||
+        channelByAuthIndex.has(authIndex) ||
+        sourceInfoMap.byAuthIndex.has(authIndex)
+      );
+      const isDeletedCredential = hasAuthIndex && !hasKnownAuthIndex;
+      const sourceLabel = isDeletedCredential
+        ? deletedCredentialLabel
+        : authMeta?.label || sourceMeta.displayName || authIndex;
       const sourceMasked = maskEmailLike(sourceLabel);
-      const account = authMeta?.account || sourceLabel;
+      const account = isDeletedCredential ? sourceLabel : authMeta?.account || sourceLabel;
       const accountMasked = maskEmailLike(account);
       const resolvedProvider = (detail.provider || authMeta?.provider || sourceMeta.type || '-').toLowerCase();
       const resolvedAuthType = detail.auth_type || (authMeta ? (authMeta.runtimeOnly ? '' : 'oauth') : '');
@@ -1520,12 +1539,13 @@ const buildEventRows = (
         authIndex,
         authIndexMasked: maskAuthIndex(authIndex),
         clientApiKey: clientApiKeyIdentity,
-        authLabel: authMeta?.label || sourceMasked,
+        authLabel: isDeletedCredential ? deletedCredentialLabel : authMeta?.label || sourceMasked,
         provider: resolvedProvider,
         planType: authMeta?.planType || '-',
         channel: channelLabel,
         channelHost: channelMeta?.host || '-',
         channelDisabled: channelMeta?.disabled || false,
+        credentialDeleted: isDeletedCredential,
         failed: detail.failed === true,
         statsIncluded,
         latencyMs: typeof detail.latency_ms === 'number' ? detail.latency_ms : null,
@@ -1538,8 +1558,8 @@ const buildEventRows = (
         taskKey,
         searchText: buildSearchText(
           detail.__modelName,
-          sourceLabel,
-          authMeta?.account,
+          isDeletedCredential ? deletedCredentialLabel : sourceLabel,
+          isDeletedCredential ? '' : authMeta?.account,
           authMeta?.label,
           authIndex,
           channelLabel,
@@ -1691,6 +1711,7 @@ export function useMonitoringData({
   modelPrices,
   timeRange,
   searchQuery,
+  deletedCredentialLabel = DELETED_CREDENTIAL_FALLBACK_LABEL,
 }: UseMonitoringDataParams): UseMonitoringDataReturn {
   const [authFiles, setAuthFiles] = useState<AuthFileItem[]>([]);
   const [channels, setChannels] = useState<MonitoringChannelMeta[]>([]);
@@ -1786,9 +1807,10 @@ export function useMonitoringData({
       sourceInfoMap,
       channelByAuthIndex,
       configuredApiKeys,
-      modelPrices
+      modelPrices,
+      deletedCredentialLabel
     ).sort((left, right) => right.timestampMs - left.timestampMs);
-  }, [authFileMap, authMetaMap, channelByAuthIndex, configuredApiKeys, modelPrices, sourceInfoMap, usage]);
+  }, [authFileMap, authMetaMap, channelByAuthIndex, configuredApiKeys, deletedCredentialLabel, modelPrices, sourceInfoMap, usage]);
 
   const filteredRows = useMemo(
     () => buildRangeFilteredRows(allRows, timeRange, searchQuery),

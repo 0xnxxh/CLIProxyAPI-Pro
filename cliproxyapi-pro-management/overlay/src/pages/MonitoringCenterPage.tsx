@@ -2414,6 +2414,7 @@ export function MonitoringCenterPage() {
     modelPrices,
     timeRange,
     searchQuery: deferredSearch,
+    deletedCredentialLabel: t('monitoring.deleted_credential'),
   });
 
   const refreshAll = useCallback(async () => {
