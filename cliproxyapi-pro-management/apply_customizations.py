@@ -201,11 +201,30 @@ def patch_icons(target: Path) -> None:
 def patch_quota_types(target: Path) -> None:
     path = target / 'src/types/quota.ts'
     for old, new in [
-        ("  errorStatus?: number;\n}\n\n// Quota state types", "  errorStatus?: number;\n  cachedAt?: number;\n}\n\n// Quota state types"),
-        ("  errorStatus?: number;\n}\n\nexport interface GeminiCliQuotaBucketState", "  errorStatus?: number;\n  cachedAt?: number;\n}\n\nexport interface GeminiCliQuotaBucketState"),
-        ("  errorStatus?: number;\n}\n\nexport interface CodexQuotaWindow", "  errorStatus?: number;\n  cachedAt?: number;\n}\n\nexport interface CodexQuotaWindow"),
-        ("  errorStatus?: number;\n}\n\n// Kimi API payload types", "  errorStatus?: number;\n  cachedAt?: number;\n}\n\n// Kimi API payload types"),
-        ("  errorStatus?: number;\n}\n", "  errorStatus?: number;\n  cachedAt?: number;\n}\n"),
+        (
+            "  errorStatus?: number;\n}\n\n// Quota state types",
+            "  errorStatus?: number;\n  cachedAt?: number;\n}\n\n// Quota state types",
+        ),
+        (
+            "  errorStatus?: number;\n}\n\nexport interface GeminiCliQuotaBucketState",
+            "  errorStatus?: number;\n  cachedAt?: number;\n}\n\nexport interface GeminiCliQuotaBucketState",
+        ),
+        (
+            "  errorStatus?: number;\n}\n\nexport interface CodexQuotaWindow",
+            "  errorStatus?: number;\n  cachedAt?: number;\n}\n\nexport interface CodexQuotaWindow",
+        ),
+        (
+            "  errorStatus?: number;\n}\n\n// Kimi API payload types",
+            "  errorStatus?: number;\n  cachedAt?: number;\n}\n\n// Kimi API payload types",
+        ),
+        (
+            "export interface KimiQuotaState {\n  status: 'idle' | 'loading' | 'success' | 'error';\n  rows: KimiQuotaRow[];\n  error?: string;\n  errorStatus?: number;\n}",
+            "export interface KimiQuotaState {\n  status: 'idle' | 'loading' | 'success' | 'error';\n  rows: KimiQuotaRow[];\n  error?: string;\n  errorStatus?: number;\n  cachedAt?: number;\n}",
+        ),
+        (
+            "export interface XaiQuotaState {\n  status: 'idle' | 'loading' | 'success' | 'error';\n  billing: XaiBillingSummary | null;\n  error?: string;\n  errorStatus?: number;\n}",
+            "export interface XaiQuotaState {\n  status: 'idle' | 'loading' | 'success' | 'error';\n  billing: XaiBillingSummary | null;\n  error?: string;\n  errorStatus?: number;\n  cachedAt?: number;\n}",
+        ),
     ]:
         replace_once(path, old, new)
 
@@ -213,11 +232,30 @@ def patch_quota_types(target: Path) -> None:
 def patch_quota_configs(target: Path) -> None:
     path = target / 'src/components/quota/quotaConfigs.ts'
     for old, new in [
-        ("    extraUsage: data.extraUsage,\n    planType: data.planType,\n  }),", "    extraUsage: data.extraUsage,\n    planType: data.planType,\n    cachedAt: Date.now(),\n  }),"),
-        ("  buildSuccessState: (groups) => ({ status: 'success', groups }),", "  buildSuccessState: (groups) => ({ status: 'success', groups, cachedAt: Date.now() }),"),
-        ("    windows: data.windows,\n    planType: data.planType,\n  }),", "    windows: data.windows,\n    planType: data.planType,\n    cachedAt: Date.now(),\n  }),"),
-        ("      creditBalance: supplementarySnapshot.creditBalance ?? data.creditBalance,\n    };", "      creditBalance: supplementarySnapshot.creditBalance ?? data.creditBalance,\n      cachedAt: Date.now(),\n    };"),
-        ("  buildSuccessState: (rows) => ({ status: 'success', rows }),", "  buildSuccessState: (rows) => ({ status: 'success', rows, cachedAt: Date.now() }),"),
+        (
+            "    extraUsage: data.extraUsage,\n    planType: data.planType,\n  }),",
+            "    extraUsage: data.extraUsage,\n    planType: data.planType,\n    cachedAt: Date.now(),\n  }),",
+        ),
+        (
+            "  buildSuccessState: (groups) => ({ status: 'success', groups }),",
+            "  buildSuccessState: (groups) => ({ status: 'success', groups, cachedAt: Date.now() }),",
+        ),
+        (
+            "    windows: data.windows,\n    planType: data.planType,\n    subscriptionActiveUntil: data.subscriptionActiveUntil,\n    rateLimitResetCreditsAvailableCount: data.rateLimitResetCreditsAvailableCount,\n  }),",
+            "    windows: data.windows,\n    planType: data.planType,\n    subscriptionActiveUntil: data.subscriptionActiveUntil,\n    rateLimitResetCreditsAvailableCount: data.rateLimitResetCreditsAvailableCount,\n    cachedAt: Date.now(),\n  }),",
+        ),
+        (
+            "      creditBalance: supplementarySnapshot.creditBalance ?? data.creditBalance,\n    };",
+            "      creditBalance: supplementarySnapshot.creditBalance ?? data.creditBalance,\n      cachedAt: Date.now(),\n    };",
+        ),
+        (
+            "  buildSuccessState: (rows) => ({ status: 'success', rows }),",
+            "  buildSuccessState: (rows) => ({ status: 'success', rows, cachedAt: Date.now() }),",
+        ),
+        (
+            "  buildSuccessState: (billing) => ({ status: 'success', billing }),",
+            "  buildSuccessState: (billing) => ({ status: 'success', billing, cachedAt: Date.now() }),",
+        ),
     ]:
         replace_once(path, old, new)
 
@@ -236,8 +274,8 @@ def patch_quota_page(target: Path) -> None:
     )
     replace_once(
         path,
-        "  useEffect(() => {\n    loadFiles();\n    loadConfig();\n  }, [loadFiles, loadConfig]);\n",
-        "  useEffect(() => {\n    loadFiles();\n    loadConfig();\n    void quotaPersistenceMiddleware.ensureFresh();\n  }, [loadFiles, loadConfig]);\n",
+        "  useEffect(() => {\n    loadFiles();\n  }, [loadFiles]);\n",
+        "  useEffect(() => {\n    loadFiles();\n    void quotaPersistenceMiddleware.ensureFresh();\n  }, [loadFiles]);\n",
     )
     replace_all(
         path,
