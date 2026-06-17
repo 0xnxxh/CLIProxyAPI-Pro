@@ -2916,6 +2916,9 @@ func buildAntigravityGroups(body string) ([]map[string]any, error) {
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
 		return nil, err
 	}
+	if groups := buildAntigravitySummaryGroups(payload); len(groups) > 0 {
+		return groups, nil
+	}
 	models, ok := payload["models"].(map[string]any)
 	if !ok || len(models) == 0 {
 		return nil, fmt.Errorf("empty models")
@@ -2966,13 +2969,138 @@ func buildAntigravityGroups(body string) ([]map[string]any, error) {
 				remaining = value
 			}
 		}
-		group := map[string]any{"id": def.ID, "label": def.Label, "models": modelIDs, "remainingFraction": remaining}
+		bucket := map[string]any{"id": def.ID + "-quota", "label": def.Label, "remainingFraction": remaining}
+		group := map[string]any{"id": def.ID, "label": def.Label, "models": modelIDs, "remainingFraction": remaining, "buckets": []map[string]any{bucket}}
 		if resetTime != "" {
 			group["resetTime"] = resetTime
+			bucket["resetTime"] = resetTime
 		}
 		groups = append(groups, group)
 	}
 	return groups, nil
+}
+
+func buildAntigravitySummaryGroups(payload map[string]any) []map[string]any {
+	rawGroups := anySlice(payload["groups"])
+	if len(rawGroups) == 0 {
+		return nil
+	}
+	groups := make([]map[string]any, 0, len(rawGroups))
+	for groupIndex, rawGroup := range rawGroups {
+		group, ok := rawGroup.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := firstNonEmptyStringValue(stringFromAny(firstAny(group, "displayName", "display_name")), fmt.Sprintf("Quota Group %d", groupIndex+1))
+		groupID := normalizeWindowID(label)
+		if groupID == "" {
+			groupID = fmt.Sprintf("quota-group-%d", groupIndex+1)
+		}
+		rawBuckets := anySlice(group["buckets"])
+		buckets := make([]map[string]any, 0, len(rawBuckets))
+		for bucketIndex, rawBucket := range rawBuckets {
+			bucket, ok := rawBucket.(map[string]any)
+			if !ok {
+				continue
+			}
+			remaining, ok := floatFromAny(firstAny(bucket, "remainingFraction", "remaining_fraction"))
+			if !ok {
+				continue
+			}
+			window := firstNonEmptyStringValue(stringFromAny(bucket["window"]))
+			fallbackID := fmt.Sprintf("%s-bucket-%d", groupID, bucketIndex+1)
+			if window != "" {
+				fallbackID = groupID + "-" + normalizeWindowID(window)
+			}
+			bucketID := firstNonEmptyStringValue(stringFromAny(firstAny(bucket, "bucketId", "bucket_id")), fallbackID)
+			bucketLabel := firstNonEmptyStringValue(stringFromAny(firstAny(bucket, "displayName", "display_name")), bucketID)
+			parsed := map[string]any{"id": bucketID, "label": bucketLabel, "remainingFraction": normalizeFraction(remaining)}
+			if window != "" {
+				parsed["window"] = window
+			}
+			if resetTime := firstNonEmptyStringValue(stringFromAny(firstAny(bucket, "resetTime", "reset_time"))); resetTime != "" {
+				parsed["resetTime"] = resetTime
+			}
+			if description := firstNonEmptyStringValue(stringFromAny(bucket["description"])); description != "" {
+				parsed["description"] = description
+			}
+			buckets = append(buckets, parsed)
+		}
+		if len(buckets) == 0 {
+			continue
+		}
+		parsedGroup := map[string]any{"id": groupID, "label": label, "buckets": buckets}
+		if description := firstNonEmptyStringValue(stringFromAny(group["description"])); description != "" {
+			parsedGroup["description"] = description
+		}
+		if remaining := minRemainingFractionFromBuckets(buckets); remaining != nil {
+			parsedGroup["remainingFraction"] = *remaining
+		}
+		if resetTime := earliestResetTimeFromBuckets(buckets); resetTime != "" {
+			parsedGroup["resetTime"] = resetTime
+		}
+		groups = append(groups, parsedGroup)
+	}
+	return groups
+}
+
+func minRemainingFractionFromBuckets(buckets []map[string]any) *float64 {
+	values := make([]float64, 0, len(buckets))
+	for _, bucket := range buckets {
+		if remaining, ok := floatFromAny(bucket["remainingFraction"]); ok {
+			values = append(values, normalizeFraction(remaining))
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	minValue := values[0]
+	for _, value := range values[1:] {
+		if value < minValue {
+			minValue = value
+		}
+	}
+	return &minValue
+}
+
+func earliestResetTimeFromBuckets(buckets []map[string]any) string {
+	selected := ""
+	var selectedTime time.Time
+	for _, bucket := range buckets {
+		raw := stringFromAny(bucket["resetTime"])
+		if raw == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			if selected == "" {
+				selected = raw
+			}
+			continue
+		}
+		if selected == "" || selectedTime.IsZero() || parsed.Before(selectedTime) {
+			selected = raw
+			selectedTime = parsed
+		}
+	}
+	return selected
+}
+
+func anyMapSlice(value any) []map[string]any {
+	switch items := value.(type) {
+	case []map[string]any:
+		return items
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if mapped, ok := item.(map[string]any); ok {
+				out = append(out, mapped)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func findAntigravityEntry(models map[string]any, identifier string) map[string]any {
@@ -3023,12 +3151,22 @@ func antigravityUsedPercent(groups []map[string]any, mode accountInspectionAntig
 }
 
 func antigravityGroupUsedPercent(group map[string]any) *float64 {
-	remaining, ok := floatFromAny(group["remainingFraction"])
+	remaining, ok := antigravityGroupRemainingFraction(group)
 	if !ok {
 		return nil
 	}
 	used := math.Max(0, math.Min(100, (1-normalizeFraction(remaining))*100))
 	return &used
+}
+
+func antigravityGroupRemainingFraction(group map[string]any) (float64, bool) {
+	if remaining, ok := floatFromAny(group["remainingFraction"]); ok {
+		return normalizeFraction(remaining), true
+	}
+	if remaining := minRemainingFractionFromBuckets(anyMapSlice(group["buckets"])); remaining != nil {
+		return *remaining, true
+	}
+	return 0, false
 }
 
 func antigravityClaudeGptUsedPercent(groups []map[string]any) *float64 {

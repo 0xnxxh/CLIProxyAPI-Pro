@@ -244,3 +244,59 @@ func TestQuotaSuccessStateIncludesParserMetadata(t *testing.T) {
 		t.Fatalf("rawShapeHash = %q, want populated", state["rawShapeHash"])
 	}
 }
+
+func TestBuildAntigravityGroupsSupportsSummaryBuckets(t *testing.T) {
+	body := `{
+		"groups": [{
+			"displayName": "Claude/GPT",
+			"description": "premium models",
+			"buckets": [
+				{"bucketId": "weekly", "displayName": "Weekly", "window": "weekly", "remainingFraction": 0.75, "resetTime": "2026-01-02T03:04:05Z"},
+				{"bucket_id": "five-hour", "display_name": "Five hour", "window": "5h", "remaining_fraction": 0.25, "reset_time": "2026-01-01T03:04:05Z"}
+			]
+		}]
+	}`
+
+	groups, err := buildAntigravityGroups(body)
+	if err != nil {
+		t.Fatalf("buildAntigravityGroups() error = %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups len = %d, want 1", len(groups))
+	}
+	buckets, ok := groups[0]["buckets"].([]map[string]any)
+	if !ok || len(buckets) != 2 {
+		t.Fatalf("buckets = %#v, want two parsed buckets", groups[0]["buckets"])
+	}
+	if groups[0]["remainingFraction"] != 0.25 {
+		t.Fatalf("remainingFraction = %#v, want 0.25", groups[0]["remainingFraction"])
+	}
+	used := antigravityGroupUsedPercent(map[string]any{"buckets": buckets})
+	if used == nil || *used != 75 {
+		t.Fatalf("used percent = %v, want 75", used)
+	}
+}
+
+func TestBuildAntigravityGroupsFallbackAddsBuckets(t *testing.T) {
+	body := `{
+		"models": {
+			"claude-sonnet-4-6": {"quotaInfo": {"remainingFraction": 0.4, "resetTime": "2026-01-02T03:04:05Z"}},
+			"gpt-oss-120b-medium": {"quota_info": {"remaining_fraction": 0.8}}
+		}
+	}`
+
+	groups, err := buildAntigravityGroups(body)
+	if err != nil {
+		t.Fatalf("buildAntigravityGroups() error = %v", err)
+	}
+	if len(groups) == 0 {
+		t.Fatalf("groups len = 0, want fallback groups")
+	}
+	buckets, ok := groups[0]["buckets"].([]map[string]any)
+	if !ok || len(buckets) != 1 {
+		t.Fatalf("fallback buckets = %#v, want one compatibility bucket", groups[0]["buckets"])
+	}
+	if buckets[0]["remainingFraction"] != 0.4 {
+		t.Fatalf("fallback remainingFraction = %#v, want 0.4", buckets[0]["remainingFraction"])
+	}
+}
