@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button } from '@/components/ui/Button';
@@ -89,6 +89,70 @@ const ACCOUNT_STATS_ANALYTICS_ROW_LIMIT = 6000;
 const REQUEST_LOG_INTERACTION_ROW_LIMIT = 6000;
 const REALTIME_LOG_PAGE_SIZE = 100;
 const REALTIME_LOG_ENRICH_LIMIT = REQUEST_LOG_INTERACTION_ROW_LIMIT;
+const REALTIME_LOG_COLUMNS_STORAGE_KEY = 'cli-proxy-realtime-log-columns-v2';
+const REALTIME_LOG_COLUMN_KEYS = [
+  'type',
+  'model',
+  'apiKey',
+  'recent',
+  'status',
+  'successRate',
+  'calls',
+  'ttft',
+  'latency',
+  'time',
+  'usage',
+  'cost',
+] as const;
+type RealtimeLogColumnKey = typeof REALTIME_LOG_COLUMN_KEYS[number];
+type RealtimeLogColumnPreference = {
+  key: RealtimeLogColumnKey;
+  visible: boolean;
+  width?: number;
+};
+type RealtimeLogColumnDefinition = {
+  key: RealtimeLogColumnKey;
+  label: string;
+  colClassName: string;
+  headerClassName?: string;
+  cellClassName?: (row: RealtimeLogRow) => string | undefined;
+  render: (row: RealtimeLogRow) => ReactNode;
+  width: number;
+};
+const REALTIME_LOG_COLUMN_DEFAULT_WIDTHS: Record<RealtimeLogColumnKey, number> = {
+  type: 170,
+  model: 230,
+  apiKey: 145,
+  recent: 86,
+  status: 112,
+  successRate: 86,
+  calls: 76,
+  ttft: 92,
+  latency: 96,
+  time: 164,
+  usage: 210,
+  cost: 92,
+};
+const REALTIME_LOG_COLUMN_MIN_WIDTHS: Record<RealtimeLogColumnKey, number> = {
+  type: 96,
+  model: 132,
+  apiKey: 104,
+  recent: 76,
+  status: 86,
+  successRate: 76,
+  calls: 68,
+  ttft: 76,
+  latency: 76,
+  time: 116,
+  usage: 122,
+  cost: 76,
+};
+const REALTIME_LOG_COLUMN_MAX_WIDTH = 420;
+const REALTIME_LOG_COLUMN_KEY_SET = new Set<RealtimeLogColumnKey>(REALTIME_LOG_COLUMN_KEYS);
+const createDefaultRealtimeLogColumns = (): RealtimeLogColumnPreference[] => (
+  REALTIME_LOG_COLUMN_KEYS.map((key) => ({ key, visible: true }))
+);
+const REALTIME_LOG_DEFAULT_COLUMNS = createDefaultRealtimeLogColumns();
 const ACCOUNT_STATUS_COLOR_STOPS = [
   { r: 239, g: 68, b: 68 },
   { r: 250, g: 204, b: 21 },
@@ -110,6 +174,120 @@ const getAccountStatusColor = (rate: number) => {
 const formatStatusRate = (rate: number) => {
   const rounded = rate.toFixed(1);
   return `${rounded.endsWith('.0') ? rounded.slice(0, -2) : rounded}%`;
+};
+
+const isRealtimeLogColumnKey = (value: unknown): value is RealtimeLogColumnKey => (
+  typeof value === 'string' && REALTIME_LOG_COLUMN_KEY_SET.has(value as RealtimeLogColumnKey)
+);
+
+const clampRealtimeLogColumnWidth = (key: RealtimeLogColumnKey, width: unknown) => {
+  const numericWidth = typeof width === 'number' && Number.isFinite(width)
+    ? width
+    : REALTIME_LOG_COLUMN_DEFAULT_WIDTHS[key];
+  return Math.min(REALTIME_LOG_COLUMN_MAX_WIDTH, Math.max(REALTIME_LOG_COLUMN_MIN_WIDTHS[key], Math.round(numericWidth)));
+};
+
+const normalizeRealtimeLogColumnWidth = (key: RealtimeLogColumnKey, width: unknown) => (
+  typeof width === 'number' && Number.isFinite(width)
+    ? clampRealtimeLogColumnWidth(key, width)
+    : undefined
+);
+
+const normalizeRealtimeLogColumns = (value: unknown): RealtimeLogColumnPreference[] => {
+  const next: RealtimeLogColumnPreference[] = [];
+  const seen = new Set<RealtimeLogColumnKey>();
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => {
+      if (!item || typeof item !== 'object') return;
+      const key = (item as { key?: unknown }).key;
+      if (!isRealtimeLogColumnKey(key) || seen.has(key)) return;
+      next.push({
+        key,
+        visible: (item as { visible?: unknown }).visible !== false,
+        width: normalizeRealtimeLogColumnWidth(key, (item as { width?: unknown }).width),
+      });
+      seen.add(key);
+    });
+  }
+
+  REALTIME_LOG_DEFAULT_COLUMNS.forEach((item) => {
+    if (!seen.has(item.key)) {
+      next.push({ ...item });
+    }
+  });
+
+  return next.some((item) => item.visible) ? next : createDefaultRealtimeLogColumns();
+};
+
+const loadRealtimeLogColumns = () => {
+  if (typeof window === 'undefined') {
+    return createDefaultRealtimeLogColumns();
+  }
+  try {
+    return normalizeRealtimeLogColumns(JSON.parse(window.localStorage.getItem(REALTIME_LOG_COLUMNS_STORAGE_KEY) || 'null'));
+  } catch {
+    return createDefaultRealtimeLogColumns();
+  }
+};
+
+const saveRealtimeLogColumns = (columns: RealtimeLogColumnPreference[]) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(REALTIME_LOG_COLUMNS_STORAGE_KEY, JSON.stringify(columns));
+  } catch {
+    // Column preferences are convenience state; storage failures should not break logs.
+  }
+};
+
+const getRealtimeLogColumnContentTexts = (key: RealtimeLogColumnKey, row: RealtimeLogRow) => {
+  switch (key) {
+    case 'type':
+      return [row.provider, row.account || row.authLabel || row.accountMasked || '-'];
+    case 'model':
+      return [row.model, row.modelAlias && row.modelAlias !== row.model ? row.modelAlias : buildRealtimeMetaText(row)];
+    case 'apiKey':
+      return [row.clientApiKey.masked];
+    case 'recent':
+      return ['||||||||||'];
+    case 'status':
+      return [row.failed ? 'Failed' : 'Success', row.diagnosticText ?? ''];
+    case 'successRate':
+      return [formatPercent(row.successRate)];
+    case 'calls':
+      return [formatCompactNumber(row.requestCount)];
+    case 'ttft':
+      return [formatDurationMs(row.ttftMs)];
+    case 'latency':
+      return [formatDurationMs(row.latencyMs)];
+    case 'time':
+      return [new Date(row.timestampMs).toLocaleString()];
+    case 'usage':
+      return [
+        formatCompactNumber(row.totalTokens),
+        `I ${formatCompactNumber(row.inputTokens)} O ${formatCompactNumber(row.outputTokens)}`,
+        `R ${formatCompactNumber(row.reasoningTokens)} C ${formatCompactNumber(row.cachedTokens)}`,
+      ];
+    case 'cost':
+      return [formatUsd(row.totalCost)];
+    default:
+      return [];
+  }
+};
+
+const estimateRealtimeLogColumnWidth = (
+  key: RealtimeLogColumnKey,
+  label: string,
+  rows: RealtimeLogRow[]
+) => {
+  const maxTextLength = rows.reduce((maxLength, row) => {
+    const rowMaxLength = getRealtimeLogColumnContentTexts(key, row)
+      .reduce((innerMax, text) => Math.max(innerMax, text.length), 0);
+    return Math.max(maxLength, rowMaxLength);
+  }, label.length);
+  const characterWidth = key === 'recent' ? 6 : key === 'usage' ? 8 : 7;
+  const padding = key === 'status' ? 36 : key === 'usage' ? 34 : 28;
+  return clampRealtimeLogColumnWidth(key, maxTextLength * characterWidth + padding);
 };
 
 const formatStatusWindowLabel = (startTime: number, endTime: number, locale: string) => {
@@ -2697,8 +2875,12 @@ export function MonitoringCenterPage() {
   const [accountStatsMetric, setAccountStatsMetric] = useState<AccountSortMetric>('recent');
   const [isAccountStatsHidden, setIsAccountStatsHidden] = useState(false);
   const [realtimeLogPage, setRealtimeLogPage] = useState(1);
+  const [realtimeLogColumns, setRealtimeLogColumns] = useState<RealtimeLogColumnPreference[]>(loadRealtimeLogColumns);
+  const [draggedRealtimeLogColumnKey, setDraggedRealtimeLogColumnKey] = useState<RealtimeLogColumnKey | null>(null);
+  const [isRealtimeColumnsMenuOpen, setIsRealtimeColumnsMenuOpen] = useState(false);
   const accountQuotaStatesRef = useRef<Record<string, AccountQuotaState>>({});
   const accountQuotaRequestIdsRef = useRef<Record<string, number>>({});
+  const realtimeColumnsMenuRef = useRef<HTMLDivElement | null>(null);
   const deferredSearch = useDeferredValue(searchInput);
 
   const {
@@ -3092,6 +3274,195 @@ export function MonitoringCenterPage() {
     realtimeLogRows.length,
     realtimeLogPageRows.length
   );
+  const realtimeLogColumnDefinitions = useMemo<Record<RealtimeLogColumnKey, RealtimeLogColumnDefinition>>(() => ({
+    type: {
+      key: 'type',
+      label: t('monitoring.column_type'),
+      colClassName: styles.realtimeTypeCol,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.type,
+      render: (row) => (
+        <div className={styles.primaryCell}>
+          <span>{row.provider}</span>
+          <small>{row.account || row.authLabel || row.accountMasked || '-'}</small>
+        </div>
+      ),
+    },
+    model: {
+      key: 'model',
+      label: t('monitoring.column_model'),
+      colClassName: styles.realtimeModelCol,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.model,
+      render: (row) => (
+        <div className={styles.primaryCell}>
+          <span className={styles.monoCell}>{row.model}</span>
+          <small className={styles.monoCell}>
+            {row.modelAlias && row.modelAlias !== row.model ? row.modelAlias : buildRealtimeMetaText(row)}
+          </small>
+          {row.modelAlias && row.modelAlias !== row.model ? (
+            <small className={styles.monoCell}>{buildRealtimeMetaText(row)}</small>
+          ) : null}
+        </div>
+      ),
+    },
+    apiKey: {
+      key: 'apiKey',
+      label: t('monitoring.api_key_label'),
+      colClassName: styles.realtimeApiKeyCol,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.apiKey,
+      render: (row) => <span className={styles.monoCell}>{row.clientApiKey.masked}</span>,
+    },
+    recent: {
+      key: 'recent',
+      label: t('monitoring.recent_status'),
+      colClassName: styles.realtimeRecentCol,
+      cellClassName: () => styles.realtimeNowrapCell,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.recent,
+      render: (row) => (
+        <div className={styles.recentStatusCell}>
+          <RecentPattern
+            pattern={row.recentPattern}
+            variant="plain"
+            label={t('monitoring.recent_pattern_label', {
+              total: row.recentPattern.length,
+              success: row.recentSuccessCount,
+              failure: row.recentFailureCount,
+            })}
+          />
+        </div>
+      ),
+    },
+    status: {
+      key: 'status',
+      label: t('monitoring.request_status'),
+      colClassName: styles.realtimeStatusCol,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.status,
+      render: (row) => (
+        <div className={styles.primaryCell}>
+          <StatusBadge tone={row.failed ? 'bad' : 'good'}>
+            {row.failed ? t('monitoring.result_failed') : t('monitoring.result_success')}
+          </StatusBadge>
+          {row.diagnosticText ? (
+            <small className={styles.monoCell}>{row.diagnosticText}</small>
+          ) : null}
+        </div>
+      ),
+    },
+    successRate: {
+      key: 'successRate',
+      label: t('monitoring.column_success_rate'),
+      colClassName: styles.realtimeRateCol,
+      headerClassName: styles.realtimeMetricHeader,
+      cellClassName: (row) => `${styles.realtimeMetricCell} ${getSuccessRateClassName(row.successRate)}`,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.successRate,
+      render: (row) => formatPercent(row.successRate),
+    },
+    calls: {
+      key: 'calls',
+      label: t('monitoring.total_calls'),
+      colClassName: styles.realtimeCountCol,
+      headerClassName: styles.realtimeMetricHeader,
+      cellClassName: () => styles.realtimeMetricCell,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.calls,
+      render: (row) => formatCompactNumber(row.requestCount),
+    },
+    ttft: {
+      key: 'ttft',
+      label: t('monitoring.column_ttft'),
+      colClassName: styles.realtimeTtftCol,
+      headerClassName: styles.realtimeMetricHeader,
+      cellClassName: () => styles.realtimeMetricCell,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.ttft,
+      render: (row) => (
+        <span
+          className={
+            row.ttftMs !== null && row.ttftMs >= 15000
+              ? styles.badText
+              : row.ttftMs !== null && row.ttftMs >= 8000
+                ? styles.warnText
+                : undefined
+          }
+        >
+          {formatDurationMs(row.ttftMs, { locale: i18n.language })}
+        </span>
+      ),
+    },
+    latency: {
+      key: 'latency',
+      label: t('monitoring.column_latency'),
+      colClassName: styles.realtimeLatencyCol,
+      headerClassName: styles.realtimeMetricHeader,
+      cellClassName: () => styles.realtimeMetricCell,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.latency,
+      render: (row) => (
+        <span
+          className={
+            row.latencyMs !== null && row.latencyMs >= 30000
+              ? styles.badText
+              : row.latencyMs !== null && row.latencyMs >= 15000
+                ? styles.warnText
+                : undefined
+          }
+        >
+          {formatDurationMs(row.latencyMs, { locale: i18n.language })}
+        </span>
+      ),
+    },
+    time: {
+      key: 'time',
+      label: t('monitoring.column_time'),
+      colClassName: styles.realtimeTimeCol,
+      cellClassName: () => styles.realtimeTimeCell,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.time,
+      render: (row) => new Date(row.timestampMs).toLocaleString(i18n.language),
+    },
+    usage: {
+      key: 'usage',
+      label: t('monitoring.this_call_usage'),
+      colClassName: styles.realtimeUsageCol,
+      cellClassName: () => styles.realtimeUsageTableCell,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.usage,
+      render: (row) => (
+        <div className={`${styles.primaryCell} ${styles.realtimeUsageCell}`}>
+          <span>{formatCompactNumber(row.totalTokens)}</span>
+          <small className={styles.realtimeUsageBreakdown}>
+            <span><b>I</b><span>{formatCompactNumber(row.inputTokens)}</span></span>
+            <span><b>O</b><span>{formatCompactNumber(row.outputTokens)}</span></span>
+            <span><b>R</b><span>{formatCompactNumber(row.reasoningTokens)}</span></span>
+            <span><b>C</b><span>{formatCompactNumber(row.cachedTokens)}</span></span>
+          </small>
+        </div>
+      ),
+    },
+    cost: {
+      key: 'cost',
+      label: t('monitoring.this_call_cost'),
+      colClassName: styles.realtimeCostCol,
+      headerClassName: styles.realtimeMetricHeader,
+      cellClassName: () => styles.realtimeMetricCell,
+      width: REALTIME_LOG_COLUMN_DEFAULT_WIDTHS.cost,
+      render: (row) => (hasPrices ? formatUsd(row.totalCost) : '--'),
+    },
+  }), [hasPrices, i18n.language, t]);
+  const visibleRealtimeLogColumns = useMemo(
+    () => realtimeLogColumns
+      .filter((column) => column.visible)
+      .map((column) => ({
+        ...realtimeLogColumnDefinitions[column.key],
+        width: column.width ?? estimateRealtimeLogColumnWidth(
+          column.key,
+          realtimeLogColumnDefinitions[column.key].label,
+          realtimeLogPageRows
+        ),
+      }))
+      .filter(Boolean),
+    [realtimeLogColumnDefinitions, realtimeLogColumns, realtimeLogPageRows]
+  );
+  const realtimeLogTableMinWidth = useMemo(
+    () => visibleRealtimeLogColumns.reduce((total, column) => total + column.width, 0),
+    [visibleRealtimeLogColumns]
+  );
+  const realtimeLogVisibleColumnCount = Math.max(1, visibleRealtimeLogColumns.length);
+  const realtimeLogVisiblePreferenceCount = realtimeLogColumns.filter((column) => column.visible).length;
 
   useEffect(() => {
     setRealtimeLogPage(1);
@@ -3172,6 +3543,106 @@ export function MonitoringCenterPage() {
     setSelectedApiKey('all');
     setSelectedStatus('all');
   }, []);
+
+  const updateRealtimeLogColumns = useCallback((updater: (columns: RealtimeLogColumnPreference[]) => RealtimeLogColumnPreference[]) => {
+    setRealtimeLogColumns((current) => {
+      const next = normalizeRealtimeLogColumns(updater(current));
+      saveRealtimeLogColumns(next);
+      return next;
+    });
+  }, []);
+
+  const toggleRealtimeLogColumn = useCallback((key: RealtimeLogColumnKey) => {
+    updateRealtimeLogColumns((columns) => {
+      const visibleCount = columns.filter((item) => item.visible).length;
+      return columns.map((item) => {
+        if (item.key !== key) return item;
+        if (item.visible && visibleCount <= 1) return item;
+        return { ...item, visible: !item.visible };
+      });
+    });
+  }, [updateRealtimeLogColumns]);
+
+  const reorderRealtimeLogColumn = useCallback((sourceKey: RealtimeLogColumnKey, targetKey: RealtimeLogColumnKey) => {
+    if (sourceKey === targetKey) return;
+    updateRealtimeLogColumns((columns) => {
+      const sourceIndex = columns.findIndex((item) => item.key === sourceKey);
+      const targetIndex = columns.findIndex((item) => item.key === targetKey);
+      if (sourceIndex < 0 || targetIndex < 0) return columns;
+      const next = [...columns];
+      const [item] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, item);
+      return next;
+    });
+  }, [updateRealtimeLogColumns]);
+
+  const resizeRealtimeLogColumn = useCallback((key: RealtimeLogColumnKey, width: number) => {
+    updateRealtimeLogColumns((columns) => columns.map((column) => (
+      column.key === key ? { ...column, width: clampRealtimeLogColumnWidth(key, width) } : column
+    )));
+  }, [updateRealtimeLogColumns]);
+
+  const handleRealtimeLogHeaderDragStart = useCallback((event: DragEvent<HTMLTableCellElement>, key: RealtimeLogColumnKey) => {
+    setDraggedRealtimeLogColumnKey(key);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', key);
+  }, []);
+
+  const handleRealtimeLogHeaderDragOver = useCallback((event: DragEvent<HTMLTableCellElement>) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }, []);
+
+  const handleRealtimeLogHeaderDrop = useCallback((event: DragEvent<HTMLTableCellElement>, targetKey: RealtimeLogColumnKey) => {
+    event.preventDefault();
+    const sourceKey = draggedRealtimeLogColumnKey ?? event.dataTransfer.getData('text/plain');
+    if (isRealtimeLogColumnKey(sourceKey)) {
+      reorderRealtimeLogColumn(sourceKey, targetKey);
+    }
+    setDraggedRealtimeLogColumnKey(null);
+  }, [draggedRealtimeLogColumnKey, reorderRealtimeLogColumn]);
+
+  const handleRealtimeLogHeaderDragEnd = useCallback(() => {
+    setDraggedRealtimeLogColumnKey(null);
+  }, []);
+
+  const startRealtimeLogColumnResize = useCallback((event: ReactMouseEvent<HTMLSpanElement>, key: RealtimeLogColumnKey) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startX = event.clientX;
+    const startWidth = visibleRealtimeLogColumns.find((column) => column.key === key)?.width ?? REALTIME_LOG_COLUMN_DEFAULT_WIDTHS[key];
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      resizeRealtimeLogColumn(key, startWidth + moveEvent.clientX - startX);
+    };
+    const handleMouseUp = () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }, [resizeRealtimeLogColumn, visibleRealtimeLogColumns]);
+
+  const resetRealtimeLogColumns = useCallback(() => {
+    updateRealtimeLogColumns(() => createDefaultRealtimeLogColumns());
+  }, [updateRealtimeLogColumns]);
+
+  useEffect(() => {
+    if (!isRealtimeColumnsMenuOpen) return undefined;
+
+    const handleDocumentMouseDown = (event: MouseEvent) => {
+      if (event.target instanceof Node && realtimeColumnsMenuRef.current?.contains(event.target)) {
+        return;
+      }
+      setIsRealtimeColumnsMenuOpen(false);
+    };
+
+    document.addEventListener('mousedown', handleDocumentMouseDown);
+    return () => {
+      document.removeEventListener('mousedown', handleDocumentMouseDown);
+    };
+  }, [isRealtimeColumnsMenuOpen]);
 
   const loadAccountQuota = useCallback(
     async (account: string, force: boolean = false) => {
@@ -3535,6 +4006,43 @@ export function MonitoringCenterPage() {
             <IconSlidersHorizontal size={16} />
             <span>{t('monitoring.clear_filters')}</span>
           </button>
+          <div className={styles.realtimeColumnsMenu} ref={realtimeColumnsMenuRef}>
+            <button
+              type="button"
+              className={styles.clearButton}
+              onClick={() => setIsRealtimeColumnsMenuOpen((open) => !open)}
+              aria-expanded={isRealtimeColumnsMenuOpen}
+            >
+              <IconSlidersHorizontal size={16} />
+              <span>{t('monitoring.realtime_columns_title')}</span>
+            </button>
+            {isRealtimeColumnsMenuOpen ? (
+              <div className={styles.realtimeColumnsDropdown}>
+                <div className={styles.realtimeColumnsDropdownHeader}>
+                  <span>{t('monitoring.realtime_columns_hint')}</span>
+                  <button type="button" className={styles.inlineActionButton} onClick={resetRealtimeLogColumns}>
+                    {t('monitoring.realtime_columns_reset')}
+                  </button>
+                </div>
+                <div className={styles.realtimeColumnsDropdownList}>
+                  {realtimeLogColumns.map((column) => {
+                    const definition = realtimeLogColumnDefinitions[column.key];
+                    return (
+                      <label key={column.key} className={styles.realtimeColumnToggle}>
+                        <input
+                          type="checkbox"
+                          checked={column.visible}
+                          disabled={column.visible && realtimeLogVisiblePreferenceCount <= 1}
+                          onChange={() => toggleRealtimeLogColumn(column.key)}
+                        />
+                        <span>{definition.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         {combinedError ? <div className={styles.errorBox}>{combinedError}</div> : null}
@@ -3554,139 +4062,56 @@ export function MonitoringCenterPage() {
         </div>
 
         <div className={`${styles.tableWrapper} ${styles.tableScrollWrapper} ${styles.realtimeTableWrapper}`}>
-          <table className={`${styles.table} ${styles.realtimeTable}`}>
+          <table
+            className={`${styles.table} ${styles.realtimeTable}`}
+            style={{ '--realtime-table-min-width': `${realtimeLogTableMinWidth}px` } as CSSProperties}
+          >
             <colgroup>
-              <col className={styles.realtimeTypeCol} />
-              <col className={styles.realtimeModelCol} />
-              <col className={styles.realtimeApiKeyCol} />
-              <col className={styles.realtimeRecentCol} />
-              <col className={styles.realtimeStatusCol} />
-              <col className={styles.realtimeRateCol} />
-              <col className={styles.realtimeCountCol} />
-              <col className={styles.realtimeTtftCol} />
-              <col className={styles.realtimeLatencyCol} />
-              <col className={styles.realtimeTimeCol} />
-              <col className={styles.realtimeUsageCol} />
-              <col className={styles.realtimeCostCol} />
+              {visibleRealtimeLogColumns.map((column) => (
+                <col key={column.key} className={column.colClassName} style={{ width: `${column.width}px` }} />
+              ))}
             </colgroup>
             <thead>
               <tr>
-                <th>{t('monitoring.column_type')}</th>
-                <th>{t('monitoring.column_model')}</th>
-                <th>{t('monitoring.api_key_label')}</th>
-                <th>{t('monitoring.recent_status')}</th>
-                <th>{t('monitoring.request_status')}</th>
-                <th>{t('monitoring.column_success_rate')}</th>
-                <th>{t('monitoring.total_calls')}</th>
-                <th>{t('monitoring.column_ttft')}</th>
-                <th>{t('monitoring.column_latency')}</th>
-                <th>{t('monitoring.column_time')}</th>
-                <th>{t('monitoring.this_call_usage')}</th>
-                <th>{t('monitoring.this_call_cost')}</th>
+                {visibleRealtimeLogColumns.map((column) => (
+                  <th
+                    key={column.key}
+                    className={[
+                      styles.realtimeDraggableHeader,
+                      column.headerClassName,
+                      draggedRealtimeLogColumnKey === column.key ? styles.realtimeDraggableHeaderActive : '',
+                    ].filter(Boolean).join(' ')}
+                    draggable
+                    scope="col"
+                    onDragStart={(event) => handleRealtimeLogHeaderDragStart(event, column.key)}
+                    onDragOver={handleRealtimeLogHeaderDragOver}
+                    onDrop={(event) => handleRealtimeLogHeaderDrop(event, column.key)}
+                    onDragEnd={handleRealtimeLogHeaderDragEnd}
+                  >
+                    <span className={styles.realtimeHeaderContent}>{column.label}</span>
+                    <span
+                      className={styles.realtimeColumnResizeHandle}
+                      role="separator"
+                      aria-label={t('monitoring.realtime_column_resize', { column: column.label })}
+                      onMouseDown={(event) => startRealtimeLogColumnResize(event, column.key)}
+                    />
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {realtimeLogPageRows.map((row) => (
                 <tr key={row.id} className={row.failed ? styles.logRowFailed : undefined}>
-                  <td>
-                    <div className={styles.primaryCell}>
-                      <span>{row.provider}</span>
-                      <small>{row.account || row.authLabel || row.accountMasked || '-'}</small>
-                    </div>
-                  </td>
-                  <td>
-                    <div className={styles.primaryCell}>
-                      <span className={styles.monoCell}>{row.model}</span>
-                      <small className={styles.monoCell}>
-                        {row.modelAlias && row.modelAlias !== row.model ? row.modelAlias : buildRealtimeMetaText(row)}
-                      </small>
-                      {row.modelAlias && row.modelAlias !== row.model ? (
-                        <small className={styles.monoCell}>{buildRealtimeMetaText(row)}</small>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td>
-                    <span className={styles.monoCell}>{row.clientApiKey.masked}</span>
-                  </td>
-                  <td>
-                    <div className={styles.recentStatusCell}>
-                      <RecentPattern
-                        pattern={row.recentPattern}
-                        variant="plain"
-                        label={t('monitoring.recent_pattern_label', {
-                          total: row.recentPattern.length,
-                          success: row.recentSuccessCount,
-                          failure: row.recentFailureCount,
-                        })}
-                      />
-                    </div>
-                  </td>
-                  <td>
-                    <div className={styles.primaryCell}>
-                      <StatusBadge tone={row.failed ? 'bad' : 'good'}>
-                        {row.failed ? t('monitoring.result_failed') : t('monitoring.result_success')}
-                      </StatusBadge>
-                      {row.diagnosticText ? (
-                        <small className={styles.monoCell}>{row.diagnosticText}</small>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td
-                    className={
-                      row.successRate >= 0.95
-                        ? styles.goodText
-                        : row.successRate >= 0.85
-                          ? styles.warnText
-                          : styles.badText
-                    }
-                  >
-                    {formatPercent(row.successRate)}
-                  </td>
-                  <td>{formatCompactNumber(row.requestCount)}</td>
-                  <td>
-                    <span
-                      className={
-                        row.ttftMs !== null && row.ttftMs >= 15000
-                          ? styles.badText
-                          : row.ttftMs !== null && row.ttftMs >= 8000
-                            ? styles.warnText
-                            : undefined
-                      }
-                    >
-                      {formatDurationMs(row.ttftMs, { locale: i18n.language })}
-                    </span>
-                  </td>
-                  <td>
-                    <span
-                      className={
-                        row.latencyMs !== null && row.latencyMs >= 30000
-                          ? styles.badText
-                          : row.latencyMs !== null && row.latencyMs >= 15000
-                            ? styles.warnText
-                            : undefined
-                      }
-                    >
-                      {formatDurationMs(row.latencyMs, { locale: i18n.language })}
-                    </span>
-                  </td>
-                  <td className={styles.realtimeTimeCell}>{new Date(row.timestampMs).toLocaleString(i18n.language)}</td>
-                  <td>
-                    <div className={`${styles.primaryCell} ${styles.realtimeUsageCell}`}>
-                      <span>{formatCompactNumber(row.totalTokens)}</span>
-                      <small className={styles.realtimeUsageBreakdown}>
-                        <span><b>I</b><span>{formatCompactNumber(row.inputTokens)}</span></span>
-                        <span><b>O</b><span>{formatCompactNumber(row.outputTokens)}</span></span>
-                        <span><b>R</b><span>{formatCompactNumber(row.reasoningTokens)}</span></span>
-                        <span><b>C</b><span>{formatCompactNumber(row.cachedTokens)}</span></span>
-                      </small>
-                    </div>
-                  </td>
-                  <td>{hasPrices ? formatUsd(row.totalCost) : '--'}</td>
+                  {visibleRealtimeLogColumns.map((column) => (
+                    <td key={column.key} className={column.cellClassName?.(row)}>
+                      {column.render(row)}
+                    </td>
+                  ))}
                 </tr>
               ))}
               {realtimeLogPageRows.length === 0 ? (
                 <tr>
-                  <td colSpan={12}>
+                  <td colSpan={realtimeLogVisibleColumnCount}>
                     <div className={styles.emptyTable}>
                       {monitoringLoading ? t('common.loading') : deferredSearch.trim() ? t('monitoring.no_filtered_data') : t('monitoring.no_data')}
                     </div>
