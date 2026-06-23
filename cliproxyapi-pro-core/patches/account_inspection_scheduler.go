@@ -2490,6 +2490,9 @@ func savePluginVirtualAuthToSourceFile(auth *coreauth.Auth) error {
 		auth.Metadata = make(map[string]any)
 	}
 	auth.Metadata["disabled"] = auth.Disabled
+	if coreauth.IsPluginVirtualAuth(auth) {
+		return savePluginVirtualManagedMetadataToSourceFile(sourcePath, auth)
+	}
 	type metadataSetter interface {
 		SetMetadata(map[string]any)
 	}
@@ -2504,6 +2507,81 @@ func savePluginVirtualAuthToSourceFile(auth *coreauth.Auth) error {
 		return err
 	}
 	return os.WriteFile(sourcePath, append(raw, '\n'), 0o600)
+}
+
+func savePluginVirtualManagedMetadataToSourceFile(sourcePath string, auth *coreauth.Auth) error {
+	source, err := readPluginVirtualSourceMetadata(sourcePath)
+	if err != nil {
+		return err
+	}
+	return writePluginVirtualManagedMetadataToSourceFile(sourcePath, auth, source)
+}
+
+func readPluginVirtualSourceMetadata(sourcePath string) (map[string]any, error) {
+	rawSource, err := os.ReadFile(sourcePath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	source := make(map[string]any)
+	if len(bytes.TrimSpace(rawSource)) > 0 {
+		if err = json.Unmarshal(rawSource, &source); err != nil {
+			return nil, fmt.Errorf("decode plugin virtual auth source: %w", err)
+		}
+		if source == nil {
+			source = make(map[string]any)
+		}
+	}
+	return source, nil
+}
+
+func writePluginVirtualManagedMetadataToSourceFile(sourcePath string, auth *coreauth.Auth, source map[string]any) error {
+	if source == nil {
+		source = make(map[string]any)
+	}
+	source["disabled"] = auth.Disabled
+	if value, ok := auth.Metadata["last_error"]; ok {
+		source["last_error"] = value
+	} else {
+		delete(source, "last_error")
+	}
+	if value, ok := auth.Metadata["quota_cache"]; ok {
+		source["quota_cache"] = value
+	}
+	if value, ok := auth.Metadata["gemini_cli_quota"]; ok {
+		source["gemini_cli_quota"] = mergePluginVirtualGeminiCLIQuotaMetadata(source["gemini_cli_quota"], value)
+	}
+	raw, err := json.Marshal(source)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(sourcePath, append(raw, '\n'), 0o600)
+}
+
+func mergePluginVirtualGeminiCLIQuotaMetadata(existing any, incoming any) any {
+	existingMap, _ := existing.(map[string]any)
+	incomingMap, _ := incoming.(map[string]any)
+	if existingMap == nil || incomingMap == nil {
+		return incoming
+	}
+	merged := cloneAnyMapForInspection(existingMap)
+	for key, value := range incomingMap {
+		if key != "projects" {
+			merged[key] = value
+			continue
+		}
+		existingProjects, _ := merged["projects"].(map[string]any)
+		incomingProjects, _ := value.(map[string]any)
+		if existingProjects == nil || incomingProjects == nil {
+			merged[key] = value
+			continue
+		}
+		projects := cloneAnyMapForInspection(existingProjects)
+		for projectID, projectState := range incomingProjects {
+			projects[projectID] = projectState
+		}
+		merged[key] = projects
+	}
+	return merged
 }
 
 func (s *accountInspectionScheduler) updatePluginVirtualRuntimeAuths(ctx context.Context, sourceAuth *coreauth.Auth, mutate func(*coreauth.Auth)) {
@@ -2538,11 +2616,22 @@ func (s *accountInspectionScheduler) updateInspectionAuth(ctx context.Context, a
 	}
 	if coreauth.IsPluginVirtualAuth(auth) {
 		sourceAuth := s.preferredAuthForPluginVirtualWrite(auth)
+		var sourceMetadata map[string]any
+		if coreauth.IsPluginVirtualAuth(sourceAuth) {
+			var err error
+			sourceMetadata, err = readPluginVirtualSourceMetadata(pluginVirtualSourcePath(sourceAuth))
+			if err != nil {
+				return err
+			}
+		}
 		mutate(sourceAuth)
+		s.updatePluginVirtualRuntimeAuths(ctx, sourceAuth, mutate)
+		if coreauth.IsPluginVirtualAuth(sourceAuth) {
+			return writePluginVirtualManagedMetadataToSourceFile(pluginVirtualSourcePath(sourceAuth), sourceAuth, sourceMetadata)
+		}
 		if err := savePluginVirtualAuthToSourceFile(sourceAuth); err != nil {
 			return err
 		}
-		s.updatePluginVirtualRuntimeAuths(ctx, sourceAuth, mutate)
 		return nil
 	}
 	mutate(auth)

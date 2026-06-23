@@ -307,7 +307,7 @@ func TestAutoActionConfirmationDelaysExecution(t *testing.T) {
 func TestExecuteActionDisablesGeminiCLIPluginVirtualSourceFile(t *testing.T) {
 	authDir := t.TempDir()
 	authPath := filepath.Join(authDir, "gemini-cli.json")
-	if err := os.WriteFile(authPath, []byte(`{"type":"gemini-cli","email":"user@example.com","project_id":"project-a","project_ids":["project-a","project-b"]}`), 0o600); err != nil {
+	if err := os.WriteFile(authPath, []byte(`{"type":"gemini-cli","email":"user@example.com","project_id":"project-a","project_ids":["project-a","project-b"],"gemini_cli_quota":{"projects":{"project-a":{"status":"success","buckets":[{"id":"existing"}]}},"latest_project_id":"project-a"}}`), 0o600); err != nil {
 		t.Fatalf("WriteFile auth error = %v", err)
 	}
 
@@ -358,12 +358,16 @@ func TestExecuteActionDisablesGeminiCLIPluginVirtualSourceFile(t *testing.T) {
 	if saved["project_id"] != "project-a" {
 		t.Fatalf("saved project_id = %#v, want primary project preserved", saved["project_id"])
 	}
+	projectIDs, ok := saved["project_ids"].([]any)
+	if !ok || len(projectIDs) != 2 || projectIDs[0] != "project-a" || projectIDs[1] != "project-b" {
+		t.Fatalf("saved project_ids = %#v, want original source project_ids preserved", saved["project_ids"])
+	}
 }
 
 func TestPersistQuotaStateWritesGeminiCLIProjectMetadataToSourceFile(t *testing.T) {
 	authDir := t.TempDir()
 	authPath := filepath.Join(authDir, "gemini-cli.json")
-	if err := os.WriteFile(authPath, []byte(`{"type":"gemini-cli","email":"user@example.com","project_id":"project-a","project_ids":["project-a","project-b"]}`), 0o600); err != nil {
+	if err := os.WriteFile(authPath, []byte(`{"type":"gemini-cli","email":"user@example.com","project_id":"project-a","project_ids":["project-a","project-b"],"gemini_cli_quota":{"projects":{"project-a":{"status":"success","buckets":[{"id":"existing"}]}},"latest_project_id":"project-a"}}`), 0o600); err != nil {
 		t.Fatalf("WriteFile auth error = %v", err)
 	}
 
@@ -425,8 +429,18 @@ func TestPersistQuotaStateWritesGeminiCLIProjectMetadataToSourceFile(t *testing.
 	if projects["project-b"] == nil {
 		t.Fatalf("project-b quota missing in %#v", projects)
 	}
+	if projects["project-a"] == nil {
+		t.Fatalf("project-a quota was not preserved in %#v", projects)
+	}
 	if geminiQuota["latest_project_id"] != "project-b" {
 		t.Fatalf("latest_project_id = %#v, want project-b", geminiQuota["latest_project_id"])
+	}
+	if saved["project_id"] != "project-a" {
+		t.Fatalf("saved project_id = %#v, want original source project_id preserved", saved["project_id"])
+	}
+	projectIDs, ok := saved["project_ids"].([]any)
+	if !ok || len(projectIDs) != 2 || projectIDs[0] != "project-a" || projectIDs[1] != "project-b" {
+		t.Fatalf("saved project_ids = %#v, want original source project_ids preserved", saved["project_ids"])
 	}
 }
 
