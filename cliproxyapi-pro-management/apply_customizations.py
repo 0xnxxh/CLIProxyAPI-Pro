@@ -120,6 +120,13 @@ GEMINI_CLI_LOCALE_KEYS = {
     },
 }
 
+AUTH_FILES_SEARCH_PLACEHOLDER_KEYS = {
+    'en.json': 'Filter by name, type, provider, note, or plan. Use * as a wildcard',
+    'ru.json': 'Фильтр по имени, типу, провайдеру, заметке или тарифу, поддерживается wildcard *',
+    'zh-CN.json': '输入名称、类型、提供方、备注或套餐关键字，支持 * 通配',
+    'zh-TW.json': '輸入名稱、類型、供應方、備註或套餐關鍵字，支援 * 萬用字元',
+}
+
 
 _writes = {}
 
@@ -538,6 +545,91 @@ def patch_quota_styles(target: Path) -> None:
     )
 
 
+def patch_auth_files_page_search(target: Path) -> None:
+    path = target / 'src/pages/AuthFilesPage.tsx'
+    insert_once(
+        path,
+        "const buildWildcardSearch = (value: string): RegExp | null => {\n"
+        "  if (!value.includes('*')) return null;\n"
+        "  const pattern = value.split('*').map(escapeWildcardSearchSegment).join('.*');\n"
+        "  return new RegExp(pattern, 'i');\n"
+        "};\n",
+        "const buildWildcardSearch = (value: string): RegExp | null => {\n"
+        "  if (!value.includes('*')) return null;\n"
+        "  const pattern = value.split('*').map(escapeWildcardSearchSegment).join('.*');\n"
+        "  return new RegExp(pattern, 'i');\n"
+        "};\n"
+        "\n"
+        "const AUTH_FILE_SEARCH_FIELD_KEYS = [\n"
+        "  'name',\n"
+        "  'type',\n"
+        "  'provider',\n"
+        "  'note',\n"
+        "  'remark',\n"
+        "  'remarks',\n"
+        "  'description',\n"
+        "  'plan',\n"
+        "  'plan_type',\n"
+        "  'planType',\n"
+        "  'package',\n"
+        "  'package_name',\n"
+        "  'packageName',\n"
+        "  'subscription',\n"
+        "  'subscription_plan',\n"
+        "  'subscriptionPlan',\n"
+        "  'tier',\n"
+        "  'tier_id',\n"
+        "  'tierId',\n"
+        "  'tier_label',\n"
+        "  'tierLabel',\n"
+        "  'product',\n"
+        "  'product_name',\n"
+        "  'productName',\n"
+        "  'quota_plan',\n"
+        "  'quotaPlan',\n"
+        "] as const;\n"
+        "\n"
+        "const AUTH_FILE_NESTED_SEARCH_KEY_PATTERN =\n"
+        "  /(note|remark|description|desc|plan|package|subscription|tier|product|quota)/i;\n"
+        "\n"
+        "const collectAuthFileSearchValues = (value: unknown, depth = 0): string[] => {\n"
+        "  if (value == null) return [];\n"
+        "  if (typeof value === 'string') return value.trim() ? [value] : [];\n"
+        "  if (typeof value === 'number' || typeof value === 'boolean') return [String(value)];\n"
+        "  if (depth >= 2) return [];\n"
+        "  if (Array.isArray(value)) {\n"
+        "    return value.flatMap((item) => collectAuthFileSearchValues(item, depth + 1));\n"
+        "  }\n"
+        "  if (typeof value !== 'object') return [];\n"
+        "\n"
+        "  return Object.entries(value as Record<string, unknown>).flatMap(([key, nestedValue]) =>\n"
+        "    AUTH_FILE_NESTED_SEARCH_KEY_PATTERN.test(key)\n"
+        "      ? collectAuthFileSearchValues(nestedValue, depth + 1)\n"
+        "      : []\n"
+        "  );\n"
+        "};\n"
+        "\n"
+        "const buildAuthFileSearchValues = (item: Record<string, unknown>): string[] =>\n"
+        "  AUTH_FILE_SEARCH_FIELD_KEYS.flatMap((key) => collectAuthFileSearchValues(item[key]));\n",
+        "AUTH_FILE_SEARCH_FIELD_KEYS",
+    )
+    replace_once(
+        path,
+        "        [item.name, item.type, item.provider].some((value) => {\n"
+        "          const content = (value || '').toString();\n"
+        "          return wildcardSearch\n"
+        "            ? wildcardSearch.test(content)\n"
+        "            : content.toLowerCase().includes(normalizedTerm);\n"
+        "        });\n",
+        "        buildAuthFileSearchValues(item).some((value) => {\n"
+        "          const content = value.toString();\n"
+        "          return wildcardSearch\n"
+        "            ? wildcardSearch.test(content)\n"
+        "            : content.toLowerCase().includes(normalizedTerm);\n"
+        "        });\n",
+    )
+
+
 def patch_supporting_api_and_types(target: Path) -> None:
     config_path = target / 'src/types/config.ts'
     replace_once(
@@ -695,6 +787,10 @@ def patch_locales(target: Path) -> None:
         data.setdefault('quota_management', {}).update(QUOTA_LOCALE_KEYS.get(locale_path.name, {}))
         gemini_cli_locale = GEMINI_CLI_LOCALE_KEYS.get(locale_path.name, GEMINI_CLI_LOCALE_KEYS['en.json'])
         data.setdefault('auth_files', {})['filter_gemini-cli'] = gemini_cli_locale['auth_filter']
+        data.setdefault('auth_files', {})['search_placeholder'] = AUTH_FILES_SEARCH_PLACEHOLDER_KEYS.get(
+            locale_path.name,
+            AUTH_FILES_SEARCH_PLACEHOLDER_KEYS['en.json'],
+        )
         data.setdefault('gemini_cli_quota', {}).update(gemini_cli_locale['quota'])
         locale_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
 
@@ -720,6 +816,7 @@ def main() -> None:
     patch_quota_page(target)
     patch_quota_card(target)
     patch_quota_styles(target)
+    patch_auth_files_page_search(target)
     patch_supporting_api_and_types(target)
     patch_locales(target)
     flush_writes()
