@@ -175,6 +175,13 @@ def replace_once(path: Path, old: str, new: str) -> None:
     write(path, text.replace(old, new, 1))
 
 
+def replace_once_if_present(path: Path, old: str, new: str) -> None:
+    text = read(path)
+    if new in text or old not in text:
+        return
+    write(path, text.replace(old, new, 1))
+
+
 def replace_all(path: Path, old: str, new: str) -> None:
     text = read(path)
     if old not in text:
@@ -339,12 +346,38 @@ def patch_layout(target: Path) -> None:
 
 def patch_icons(target: Path) -> None:
     path = target / 'src/components/ui/icons.tsx'
-    insert_once(
-        path,
-        "export function IconSidebarLogs({ size = 20, ...props }: IconProps) {\n",
-        "export function IconSidebarMonitor({ size = 20, ...props }: IconProps) {\n  return (\n    <svg {...sidebarSvgProps} width={size} height={size} {...props}>\n      <path d=\"M3 12h3l2.2-4.5 4.2 9 2.4-5h6.2\" />\n      <path d=\"M4 19h16\" />\n      <path d=\"M4 5h16\" fill=\"currentColor\" fillOpacity=\"0.08\" />\n    </svg>\n  );\n}\n\nexport function IconSidebarLogs({ size = 20, ...props }: IconProps) {\n",
-        "export function IconSidebarMonitor",
+    text = read(path)
+    if "export function IconSidebarMonitor" in text:
+        return
+
+    if "baseSvgProps" in text:
+        svg_props = "baseSvgProps"
+    elif "sidebarSvgProps" in text:
+        svg_props = "sidebarSvgProps"
+    else:
+        raise RuntimeError(f'Pattern not found in {path}: svg props constant')
+
+    monitor_icon = (
+        "export function IconSidebarMonitor({ size = 20, ...props }: IconProps) {\n"
+        "  return (\n"
+        f"    <svg {{...{svg_props}}} width={{size}} height={{size}} {{...props}}>\n"
+        "      <path d=\"M3 12h3l2.2-4.5 4.2 9 2.4-5h6.2\" />\n"
+        "      <path d=\"M4 19h16\" />\n"
+        "      <path d=\"M4 5h16\" fill=\"currentColor\" fillOpacity=\"0.08\" />\n"
+        "    </svg>\n"
+        "  );\n"
+        "}\n\n"
     )
+    for marker in (
+        "export function IconSidebarLogs({ size = 20, ...props }: IconProps) {\n",
+        "export const IconSidebarLogs = ",
+        "export function IconSidebarSystem({ size = 20, ...props }: IconProps) {\n",
+    ):
+        if marker in text:
+            write(path, text.replace(marker, monitor_icon + marker, 1))
+            return
+
+    write(path, text.rstrip() + "\n\n" + monitor_icon)
 
 
 def patch_quota_types(target: Path) -> None:
@@ -556,12 +589,12 @@ def patch_quota_styles(target: Path) -> None:
         ".codexGrid,\n.kimiGrid,",
         ".codexGrid,\n.geminiCliGrid,\n.kimiGrid,",
     )
-    replace_once(
+    replace_once_if_present(
         path,
         ".codexControls,\n.kimiControls,",
         ".codexControls,\n.geminiCliControls,\n.kimiControls,",
     )
-    replace_once(
+    replace_once_if_present(
         path,
         ".codexControl,\n.kimiControl,",
         ".codexControl,\n.geminiCliControl,\n.kimiControl,",
