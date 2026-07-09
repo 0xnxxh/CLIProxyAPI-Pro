@@ -285,13 +285,13 @@ def patch_layout(target: Path) -> None:
     insert_once(
         path,
         "  IconSidebarProviders,\n",
-        "  IconSidebarMonitor,\n  IconSidebarProviders,\n",
-        "  IconSidebarMonitor,\n",
+        "  IconSidebarAccountInspection,\n  IconSidebarMonitor,\n  IconSidebarProviders,\n",
+        "  IconSidebarAccountInspection,\n",
     )
     replace_once(
         path,
         "  oauth: <IconSidebarOauth size={18} />,\n  quota: <IconSidebarQuota size={18} />,\n",
-        "  oauth: <IconSidebarOauth size={18} />,\n  quota: <IconSidebarQuota size={18} />,\n  monitoring: <IconSidebarMonitor size={18} />,\n",
+        "  oauth: <IconSidebarOauth size={18} />,\n  quota: <IconSidebarQuota size={18} />,\n  monitoring: <IconSidebarMonitor size={18} />,\n  accountInspection: <IconSidebarAccountInspection size={18} />,\n",
     )
     text = read(path)
     if "path: '/monitoring'" not in text:
@@ -311,7 +311,7 @@ def patch_layout(target: Path) -> None:
                     flat_quota_item,
                     flat_quota_item
                     + "    { path: '/monitoring', label: t('nav.monitoring_center'), icon: sidebarIcons.monitoring },\n"
-                    + "    { path: '/account-inspection', label: t('nav.account_inspection'), icon: sidebarIcons.monitoring },\n",
+                    + "    { path: '/account-inspection', label: t('nav.account_inspection'), icon: sidebarIcons.accountInspection },\n",
                     1,
                 ),
             )
@@ -331,13 +331,33 @@ def patch_layout(target: Path) -> None:
                     + "          path: '/account-inspection',\n"
                     + "          labelKey: 'nav.account_inspection',\n"
                     + "          metaKey: 'nav_meta.account_inspection',\n"
-                    + "          icon: sidebarIcons.monitoring,\n"
+                    + "          icon: sidebarIcons.accountInspection,\n"
                     + "        },\n",
                     1,
                 ),
             )
         else:
             raise RuntimeError(f'Pattern not found in {path}: quota navigation item')
+    replace_once_if_present(
+        path,
+        "        {\n"
+        "          path: '/account-inspection',\n"
+        "          labelKey: 'nav.account_inspection',\n"
+        "          metaKey: 'nav_meta.account_inspection',\n"
+        "          icon: sidebarIcons.monitoring,\n"
+        "        },\n",
+        "        {\n"
+        "          path: '/account-inspection',\n"
+        "          labelKey: 'nav.account_inspection',\n"
+        "          metaKey: 'nav_meta.account_inspection',\n"
+        "          icon: sidebarIcons.accountInspection,\n"
+        "        },\n",
+    )
+    replace_once_if_present(
+        path,
+        "    { path: '/account-inspection', label: t('nav.account_inspection'), icon: sidebarIcons.monitoring },\n",
+        "    { path: '/account-inspection', label: t('nav.account_inspection'), icon: sidebarIcons.accountInspection },\n",
+    )
     replace_once(
         path,
         "            <PageTransition\n",
@@ -347,8 +367,6 @@ def patch_layout(target: Path) -> None:
 def patch_icons(target: Path) -> None:
     path = target / 'src/components/ui/icons.tsx'
     text = read(path)
-    if "export function IconSidebarMonitor" in text:
-        return
 
     if "baseSvgProps" in text:
         svg_props = "baseSvgProps"
@@ -368,16 +386,37 @@ def patch_icons(target: Path) -> None:
         "  );\n"
         "}\n\n"
     )
+    account_inspection_icon = (
+        "export function IconSidebarAccountInspection({ size = 20, ...props }: IconProps) {\n"
+        "  return (\n"
+        f"    <svg {{...{svg_props}}} width={{size}} height={{size}} {{...props}}>\n"
+        "      <rect x=\"5\" y=\"3\" width=\"11\" height=\"16\" rx=\"2\" />\n"
+        "      <path d=\"M9 7h3\" />\n"
+        "      <path d=\"m8.5 11 1.4 1.4 2.6-2.8\" />\n"
+        "      <circle cx=\"16.5\" cy=\"16.5\" r=\"3\" />\n"
+        "      <path d=\"m19 19 2 2\" />\n"
+        "      <path d=\"M8 3.5h5\" fill=\"currentColor\" fillOpacity=\"0.08\" />\n"
+        "    </svg>\n"
+        "  );\n"
+        "}\n\n"
+    )
+    icons_to_insert = ""
+    if "export function IconSidebarMonitor" not in text:
+        icons_to_insert += monitor_icon
+    if "export function IconSidebarAccountInspection" not in text:
+        icons_to_insert += account_inspection_icon
+    if not icons_to_insert:
+        return
     for marker in (
         "export function IconSidebarLogs({ size = 20, ...props }: IconProps) {\n",
         "export const IconSidebarLogs = ",
         "export function IconSidebarSystem({ size = 20, ...props }: IconProps) {\n",
     ):
         if marker in text:
-            write(path, text.replace(marker, monitor_icon + marker, 1))
+            write(path, text.replace(marker, icons_to_insert + marker, 1))
             return
 
-    write(path, text.rstrip() + "\n\n" + monitor_icon)
+    write(path, text.rstrip() + "\n\n" + icons_to_insert)
 
 
 def patch_quota_types(target: Path) -> None:
