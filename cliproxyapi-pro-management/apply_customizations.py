@@ -458,6 +458,18 @@ def patch_quota_configs(target: Path) -> None:
             "        ...group.buckets.map((bucket) => {\n",
             "        ...(Array.isArray(group.buckets) ? group.buckets : []).map((bucket) => {\n",
         ),
+        (
+            "  const clampedUsed =\n",
+            "  const productUsageItems = Array.isArray(billing.productUsage) ? billing.productUsage : [];\n\n  const clampedUsed =\n",
+        ),
+        (
+            "    (weeklyUsed !== null || Boolean(billing.periodEnd) || billing.productUsage.length > 0);\n",
+            "    (weeklyUsed !== null || Boolean(billing.periodEnd) || productUsageItems.length > 0);\n",
+        ),
+        (
+            "    ...billing.productUsage.map((item) => {\n",
+            "    ...productUsageItems.map((item) => {\n",
+        ),
     ]:
         replace_once(path, old, new)
 
@@ -579,6 +591,11 @@ def patch_antigravity_quota_builders(target: Path) -> None:
         path,
         "        description: normalizeStringValue(group.description) ?? undefined,\n",
         "        description,\n",
+    )
+    replace_once(
+        path,
+        "    productUsage: primary.productUsage.length > 0 ? primary.productUsage : fallback.productUsage,\n",
+        "    productUsage: Array.isArray(primary.productUsage) && primary.productUsage.length > 0\n      ? primary.productUsage\n      : Array.isArray(fallback.productUsage)\n        ? fallback.productUsage\n        : [],\n",
     )
 
 
