@@ -77,6 +77,7 @@ export interface RoutingProtectionEvent {
 export interface RoutingPolicyResponse {
   global: RoutingPolicyGlobalSettings;
   requestProtection: RoutingRequestProtectionConfig;
+  availableProviders: RoutingPolicyProvider[];
   active: RoutingProtectedAccount[];
   recentEvents: RoutingProtectionEvent[];
 }
@@ -86,15 +87,25 @@ export interface RoutingPolicyUpdate {
   requestProtection: RoutingRequestProtectionConfig;
 }
 
-type RoutingPolicyRawResponse = Omit<RoutingPolicyResponse, 'active' | 'recentEvents'> & {
+type RoutingPolicyRawResponse = Omit<
+  RoutingPolicyResponse,
+  'availableProviders' | 'active' | 'recentEvents'
+> & {
+  availableProviders?: string[] | null;
   active?: RoutingProtectedAccount[] | null;
   recentEvents?: RoutingProtectionEvent[] | null;
 };
+
+const isRoutingPolicyProvider = (provider: string): provider is RoutingPolicyProvider =>
+  ROUTING_POLICY_PROVIDERS.some((candidate) => candidate === provider);
 
 const normalizeRoutingPolicyResponse = (
   response: RoutingPolicyRawResponse
 ): RoutingPolicyResponse => ({
   ...response,
+  availableProviders: Array.isArray(response.availableProviders)
+    ? response.availableProviders.filter(isRoutingPolicyProvider)
+    : [...ROUTING_POLICY_PROVIDERS],
   active: Array.isArray(response.active) ? response.active : [],
   recentEvents: Array.isArray(response.recentEvents) ? response.recentEvents : [],
 });

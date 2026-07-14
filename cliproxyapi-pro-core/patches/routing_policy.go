@@ -71,10 +71,11 @@ type routingPolicyGlobalSettings struct {
 }
 
 type routingPolicyResponse struct {
-	Global            routingPolicyGlobalSettings      `json:"global"`
-	RequestProtection config.RequestProtectionConfig   `json:"requestProtection"`
-	Active            []routingProtectionActiveAccount `json:"active"`
-	RecentEvents      []routingProtectionEvent         `json:"recentEvents"`
+	Global             routingPolicyGlobalSettings      `json:"global"`
+	RequestProtection  config.RequestProtectionConfig   `json:"requestProtection"`
+	AvailableProviders []string                         `json:"availableProviders"`
+	Active             []routingProtectionActiveAccount `json:"active"`
+	RecentEvents       []routingProtectionEvent         `json:"recentEvents"`
 }
 
 type routingProtectionActiveAccount struct {
@@ -699,9 +700,10 @@ func (h *Handler) ReleaseRoutingProtectedAuth(c *gin.Context) {
 
 func (h *Handler) routingPolicyResponse() routingPolicyResponse {
 	response := routingPolicyResponse{
-		RequestProtection: defaultRoutingRequestProtectionConfig(),
-		Active:            []routingProtectionActiveAccount{},
-		RecentEvents:      []routingProtectionEvent{},
+		RequestProtection:  defaultRoutingRequestProtectionConfig(),
+		AvailableProviders: []string{},
+		Active:             []routingProtectionActiveAccount{},
+		RecentEvents:       []routingProtectionEvent{},
 	}
 	h.mu.Lock()
 	if h.cfg != nil {
@@ -729,11 +731,68 @@ func (h *Handler) routingPolicyResponse() routingPolicyResponse {
 		response.RequestProtection = normalizeRoutingRequestProtectionConfig(h.cfg.Routing.RequestProtection)
 	}
 	h.mu.Unlock()
+	response.AvailableProviders = h.routingProtectionAvailableProviders()
 	response.Active = h.routingProtectionActiveAccounts()
 	if controller := routingPolicyControllerForHandler(h); controller != nil {
 		response.RecentEvents = controller.recentEvents()
 	}
 	return response
+}
+
+func (h *Handler) routingProtectionAvailableProviders() []string {
+	if h == nil {
+		return []string{}
+	}
+	h.mu.Lock()
+	available := routingProtectionConfiguredProviderSet(h.cfg)
+	manager := h.authManager
+	h.mu.Unlock()
+	var auths []*coreauth.Auth
+	if manager != nil {
+		auths = manager.List()
+	}
+	return orderedRoutingProtectionAvailableProviders(available, auths)
+}
+
+func routingProtectionConfiguredProviderSet(cfg *config.Config) map[string]struct{} {
+	available := make(map[string]struct{}, len(routingProtectionProviders))
+	if cfg == nil {
+		return available
+	}
+	configured := map[string]bool{
+		"xai":                 len(cfg.XAIKey) > 0,
+		"codex":               len(cfg.CodexKey) > 0,
+		"gemini":              len(cfg.GeminiKey) > 0,
+		"gemini-interactions": len(cfg.InteractionsKey) > 0,
+		"vertex":              len(cfg.VertexCompatAPIKey) > 0,
+		"claude":              len(cfg.ClaudeKey) > 0,
+	}
+	for provider, ok := range configured {
+		if ok {
+			available[provider] = struct{}{}
+		}
+	}
+	return available
+}
+
+func orderedRoutingProtectionAvailableProviders(available map[string]struct{}, auths []*coreauth.Auth) []string {
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if provider == "anthropic" {
+			provider = "claude"
+		}
+		available[provider] = struct{}{}
+	}
+	providers := make([]string, 0, len(routingProtectionProviders))
+	for _, provider := range routingProtectionProviders {
+		if _, ok := available[provider]; ok {
+			providers = append(providers, provider)
+		}
+	}
+	return providers
 }
 
 func (h *Handler) routingProtectionActiveAccounts() []routingProtectionActiveAccount {

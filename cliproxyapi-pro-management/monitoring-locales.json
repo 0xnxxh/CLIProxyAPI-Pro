@@ -921,6 +921,7 @@
       "protection": {
         "title": "Request Status Protection",
         "master_hint": "Observe or automatically disable credentials after confirmed matching responses.",
+        "no_providers": "No configured providers or credentials were detected.",
         "enabled": "Enable request status protection",
         "mode": "Execution mode",
         "provider_enabled": "Enable {{provider}} protection",
@@ -1884,6 +1885,7 @@
       "protection": {
         "title": "Защита по статусу запроса",
         "master_hint": "Наблюдать или автоматически отключать credential после подтверждённых ответов.",
+        "no_providers": "Настроенные провайдеры или учетные данные не обнаружены.",
         "enabled": "Включить защиту по статусу",
         "mode": "Режим выполнения",
         "provider_enabled": "Включить защиту {{provider}}",
@@ -2847,6 +2849,7 @@
       "protection": {
         "title": "请求状态保护",
         "master_hint": "匹配请求状态并达到确认门槛后，仅记录或自动禁用账号。",
+        "no_providers": "未检测到已配置的提供商或可用凭据。",
         "enabled": "启用请求状态保护",
         "mode": "执行模式",
         "provider_enabled": "启用 {{provider}} 保护",
@@ -3810,6 +3813,7 @@
       "protection": {
         "title": "請求狀態保護",
         "master_hint": "符合請求狀態並達到確認門檻後，僅記錄或自動停用帳號。",
+        "no_providers": "未偵測到已設定的供應商或可用憑據。",
         "enabled": "啟用請求狀態保護",
         "mode": "執行模式",
         "provider_enabled": "啟用 {{provider}} 保護",

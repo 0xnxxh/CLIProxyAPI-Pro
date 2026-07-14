@@ -619,7 +619,7 @@ export function RoutingPolicyPage() {
           </section>
 
           <div className={styles.providerGrid}>
-            {ROUTING_POLICY_PROVIDERS.map((provider) => {
+            {data?.availableProviders.map((provider) => {
               const policy = requestProtection.providers[provider];
               return (
                 <section className={styles.providerCard} key={provider}>
@@ -728,6 +728,11 @@ export function RoutingPolicyPage() {
               );
             })}
           </div>
+          {!data?.availableProviders.length && (
+            <div className={styles.emptyState}>
+              <p>{t('routing_policy.protection.no_providers')}</p>
+            </div>
+          )}
         </div>
       )}
 

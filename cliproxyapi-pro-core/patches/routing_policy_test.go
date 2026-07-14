@@ -64,6 +64,40 @@ func TestNormalizeRoutingRequestProtectionConfig(t *testing.T) {
 	}
 }
 
+func TestRoutingProtectionAvailableProviders(t *testing.T) {
+	available := routingProtectionConfiguredProviderSet(&config.Config{
+		GeminiKey:          []config.GeminiKey{{APIKey: "gemini-key"}},
+		InteractionsKey:    []config.GeminiKey{{APIKey: "interactions-key"}},
+		CodexKey:           []config.CodexKey{{APIKey: "codex-key"}},
+		XAIKey:             []config.XAIKey{{APIKey: "xai-key"}},
+		VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vertex-key"}},
+	})
+	auths := []*coreauth.Auth{
+		{Provider: "antigravity"},
+		{Provider: "gemini-cli"},
+		{Provider: "aistudio"},
+		{Provider: "anthropic"},
+		{Provider: "kimi"},
+		{Provider: "custom-provider"},
+		nil,
+	}
+	want := []string{
+		"antigravity",
+		"xai",
+		"codex",
+		"gemini-cli",
+		"gemini",
+		"gemini-interactions",
+		"vertex",
+		"aistudio",
+		"claude",
+		"kimi",
+	}
+	if got := orderedRoutingProtectionAvailableProviders(available, auths); !reflect.DeepEqual(got, want) {
+		t.Fatalf("providers = %#v want %#v", got, want)
+	}
+}
+
 func TestRoutingProtectionHasQuotaEvidence(t *testing.T) {
 	tests := []struct {
 		name   string
