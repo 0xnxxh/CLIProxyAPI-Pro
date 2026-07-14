@@ -1,0 +1,741 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Select';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+import { IconCheck, IconRefreshCw, IconShield } from '@/components/ui/icons';
+import {
+  ROUTING_POLICY_PROVIDERS,
+  routingPolicyApi,
+  type RoutingPolicyGlobalSettings,
+  type RoutingPolicyProvider,
+  type RoutingPolicyResponse,
+  type RoutingProtectionProviderPolicy,
+  type RoutingRequestProtectionConfig,
+} from '@/services/api/routingPolicy';
+import { useAuthStore, useNotificationStore } from '@/stores';
+import styles from './RoutingPolicyPage.module.scss';
+
+type RoutingPolicyView = 'global' | 'providers' | 'runtime';
+
+const VIEW_KEYS: RoutingPolicyView[] = ['global', 'providers', 'runtime'];
+
+const parseStatusCodes = (value: string): number[] => {
+  const result = new Set<number>();
+  for (const token of value.split(/[\s,;]+/)) {
+    if (!token) continue;
+    const status = Number(token);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) {
+      result.add(status);
+    }
+  }
+  return [...result].sort((left, right) => left - right);
+};
+
+const formatTimestamp = (value: number, locale: string, emptyText: string): string => {
+  if (!value) return emptyText;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return emptyText;
+  return new Intl.DateTimeFormat(locale, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date);
+};
+
+const toNumber = (value: string): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+export function RoutingPolicyPage() {
+  const { t, i18n } = useTranslation();
+  const connectionStatus = useAuthStore((state) => state.connectionStatus);
+  const showNotification = useNotificationStore((state) => state.showNotification);
+  const showConfirmation = useNotificationStore((state) => state.showConfirmation);
+  const [activeView, setActiveView] = useState<RoutingPolicyView>('global');
+  const [data, setData] = useState<RoutingPolicyResponse | null>(null);
+  const [globalSettings, setGlobalSettings] = useState<RoutingPolicyGlobalSettings | null>(null);
+  const [requestProtection, setRequestProtection] =
+    useState<RoutingRequestProtectionConfig | null>(null);
+  const [statusCodeInputs, setStatusCodeInputs] = useState<Record<RoutingPolicyProvider, string>>(
+    () => ({ antigravity: '', xai: '', codex: '', 'gemini-cli': '' })
+  );
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [releasing, setReleasing] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+
+  const disabled = connectionStatus !== 'connected';
+
+  const applyConfigResponse = useCallback((response: RoutingPolicyResponse) => {
+    setData(response);
+    setGlobalSettings(response.global);
+    setRequestProtection(response.requestProtection);
+    setStatusCodeInputs(
+      Object.fromEntries(
+        ROUTING_POLICY_PROVIDERS.map((provider) => [
+          provider,
+          response.requestProtection.providers[provider]?.statusCodes?.join(', ') ?? '',
+        ])
+      ) as Record<RoutingPolicyProvider, string>
+    );
+    setDirty(false);
+  }, []);
+
+  const loadPolicy = useCallback(async () => {
+    setLoading(true);
+    try {
+      applyConfigResponse(await routingPolicyApi.get());
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : t('routing_policy.load_failed');
+      showNotification(`${t('routing_policy.load_failed')}: ${message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [applyConfigResponse, showNotification, t]);
+
+  useEffect(() => {
+    void loadPolicy();
+  }, [loadPolicy]);
+
+  useEffect(() => {
+    if (activeView !== 'runtime' || connectionStatus !== 'connected') return;
+    const timer = window.setInterval(() => {
+      void routingPolicyApi
+        .get()
+        .then((response) => {
+          setData((current) =>
+            current
+              ? { ...current, active: response.active, recentEvents: response.recentEvents }
+              : response
+          );
+        })
+        .catch(() => undefined);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [activeView, connectionStatus]);
+
+  const setGlobal = useCallback(
+    <Key extends keyof RoutingPolicyGlobalSettings>(
+      key: Key,
+      value: RoutingPolicyGlobalSettings[Key]
+    ) => {
+      setGlobalSettings((current) => (current ? { ...current, [key]: value } : current));
+      setDirty(true);
+    },
+    []
+  );
+
+  const setProtection = useCallback(
+    <Key extends keyof Omit<RoutingRequestProtectionConfig, 'providers'>>(
+      key: Key,
+      value: RoutingRequestProtectionConfig[Key]
+    ) => {
+      setRequestProtection((current) => (current ? { ...current, [key]: value } : current));
+      setDirty(true);
+    },
+    []
+  );
+
+  const setProviderPolicy = useCallback(
+    <Key extends keyof RoutingProtectionProviderPolicy>(
+      provider: RoutingPolicyProvider,
+      key: Key,
+      value: RoutingProtectionProviderPolicy[Key]
+    ) => {
+      setRequestProtection((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          providers: {
+            ...current.providers,
+            [provider]: { ...current.providers[provider], [key]: value },
+          },
+        };
+      });
+      setDirty(true);
+    },
+    []
+  );
+
+  const handleSave = async () => {
+    if (!globalSettings || !requestProtection) return;
+    const providers = { ...requestProtection.providers };
+    for (const provider of ROUTING_POLICY_PROVIDERS) {
+      const statusCodes = parseStatusCodes(statusCodeInputs[provider]);
+      if (statusCodes.length === 0) {
+        showNotification(
+          t('routing_policy.status_codes_required', {
+            provider: t(`routing_policy.providers.${provider}`),
+          }),
+          'error'
+        );
+        setActiveView('providers');
+        return;
+      }
+      providers[provider] = { ...providers[provider], statusCodes };
+    }
+
+    setSaving(true);
+    try {
+      applyConfigResponse(
+        await routingPolicyApi.update({
+          global: globalSettings,
+          requestProtection: { ...requestProtection, providers },
+        })
+      );
+      showNotification(t('routing_policy.save_success'), 'success');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : t('routing_policy.save_failed');
+      showNotification(`${t('routing_policy.save_failed')}: ${message}`, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const refreshRuntime = useCallback(async () => {
+    try {
+      const response = await routingPolicyApi.get();
+      setData((current) =>
+        current ? { ...current, active: response.active, recentEvents: response.recentEvents } : response
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : t('routing_policy.load_failed');
+      showNotification(`${t('routing_policy.load_failed')}: ${message}`, 'error');
+    }
+  }, [showNotification, t]);
+
+  const handleRefresh = () => {
+    if (!dirty) {
+      void loadPolicy();
+      return;
+    }
+    showConfirmation({
+      title: t('routing_policy.discard_title'),
+      message: t('routing_policy.discard_message'),
+      confirmText: t('common.confirm'),
+      cancelText: t('common.cancel'),
+      variant: 'danger',
+      onConfirm: loadPolicy,
+    });
+  };
+
+  const releaseAccount = (authIndex: string, fileName: string) => {
+    showConfirmation({
+      title: t('routing_policy.release_title'),
+      message: t('routing_policy.release_message', { account: fileName || authIndex }),
+      confirmText: t('routing_policy.release'),
+      cancelText: t('common.cancel'),
+      onConfirm: async () => {
+        setReleasing(authIndex);
+        try {
+          const response = await routingPolicyApi.release(authIndex);
+          setData((current) =>
+            current
+              ? { ...current, active: response.active, recentEvents: response.recentEvents }
+              : response
+          );
+          showNotification(t('routing_policy.release_success'), 'success');
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : t('routing_policy.release_failed');
+          showNotification(`${t('routing_policy.release_failed')}: ${message}`, 'error');
+        } finally {
+          setReleasing(null);
+        }
+      },
+    });
+  };
+
+  const modeLabel = useMemo(() => {
+    if (!requestProtection?.enabled) return t('routing_policy.mode_disabled');
+    return requestProtection.mode === 'enforce'
+      ? t('routing_policy.mode_enforce')
+      : t('routing_policy.mode_observe');
+  }, [requestProtection, t]);
+
+  if (loading && !globalSettings) {
+    return <div className={styles.loading}>{t('common.loading')}</div>;
+  }
+
+  if (!globalSettings || !requestProtection) {
+    return (
+      <div className={styles.emptyState}>
+        <p>{t('routing_policy.load_failed')}</p>
+        <Button variant="secondary" onClick={() => void loadPolicy()}>
+          <IconRefreshCw size={16} /> {t('common.refresh')}
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.container}>
+      <header className={styles.pageHeader}>
+        <div className={styles.headerCopy}>
+          <div className={styles.titleRow}>
+            <h1 className={styles.pageTitle}>{t('routing_policy.title')}</h1>
+            <span
+              className={`${styles.modeBadge} ${
+                requestProtection.enabled && requestProtection.mode === 'enforce'
+                  ? styles.modeEnforce
+                  : ''
+              }`}
+            >
+              <IconShield size={14} />
+              {modeLabel}
+            </span>
+          </div>
+          <p className={styles.subtitle}>{t('routing_policy.subtitle')}</p>
+        </div>
+        <div className={styles.headerActions}>
+          <Button variant="secondary" onClick={handleRefresh} disabled={disabled || loading}>
+            <IconRefreshCw size={16} /> {t('common.refresh')}
+          </Button>
+          <Button onClick={() => void handleSave()} disabled={disabled || !dirty} loading={saving}>
+            <IconCheck size={16} /> {t('common.save')}
+          </Button>
+        </div>
+      </header>
+
+      <nav className={styles.viewTabs} aria-label={t('routing_policy.title')}>
+        {VIEW_KEYS.map((view) => (
+          <button
+            key={view}
+            type="button"
+            className={`${styles.viewTab} ${activeView === view ? styles.viewTabActive : ''}`}
+            onClick={() => setActiveView(view)}
+          >
+            {t(`routing_policy.views.${view}`)}
+            {view === 'runtime' && data?.active.length ? (
+              <span className={styles.tabCount}>{data.active.length}</span>
+            ) : null}
+          </button>
+        ))}
+      </nav>
+
+      {activeView === 'global' && (
+        <div className={styles.sectionStack}>
+          <section className={styles.panel}>
+            <div className={styles.sectionHeader}>
+              <h2>{t('routing_policy.global.routing_title')}</h2>
+            </div>
+            <div className={styles.fieldGrid}>
+              <div className={styles.fieldBlock}>
+                <label>{t('routing_policy.global.strategy')}</label>
+                <Select
+                  value={globalSettings.strategy}
+                  options={[
+                    { value: 'round-robin', label: t('routing_policy.global.round_robin') },
+                    { value: 'fill-first', label: t('routing_policy.global.fill_first') },
+                  ]}
+                  onChange={(value) =>
+                    setGlobal('strategy', value as RoutingPolicyGlobalSettings['strategy'])
+                  }
+                  disabled={disabled}
+                />
+              </div>
+              <div className={styles.fieldBlock}>
+                <label>{t('routing_policy.global.session_affinity_ttl')}</label>
+                <Input
+                  value={globalSettings.sessionAffinityTTL}
+                  onChange={(event) => setGlobal('sessionAffinityTTL', event.target.value)}
+                  disabled={disabled || !globalSettings.sessionAffinity}
+                  placeholder="1h"
+                />
+              </div>
+              <div className={styles.toggleField}>
+                <div>
+                  <strong>{t('routing_policy.global.session_affinity')}</strong>
+                  <span>{t('routing_policy.global.session_affinity_hint')}</span>
+                </div>
+                <ToggleSwitch
+                  checked={globalSettings.sessionAffinity}
+                  onChange={(value) => setGlobal('sessionAffinity', value)}
+                  disabled={disabled}
+                  ariaLabel={t('routing_policy.global.session_affinity')}
+                />
+              </div>
+              <div className={styles.toggleField}>
+                <div>
+                  <strong>{t('routing_policy.global.codex_identity_confuse')}</strong>
+                  <span>{t('routing_policy.global.codex_identity_confuse_hint')}</span>
+                </div>
+                <ToggleSwitch
+                  checked={globalSettings.codexIdentityConfuse}
+                  onChange={(value) => setGlobal('codexIdentityConfuse', value)}
+                  disabled={disabled}
+                  ariaLabel={t('routing_policy.global.codex_identity_confuse')}
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className={styles.panel}>
+            <div className={styles.sectionHeader}>
+              <h2>{t('routing_policy.global.retry_title')}</h2>
+            </div>
+            <div className={styles.fieldGridThree}>
+              <Input
+                label={t('routing_policy.global.request_retry')}
+                type="number"
+                min={0}
+                max={10}
+                value={globalSettings.requestRetry}
+                onChange={(event) => setGlobal('requestRetry', toNumber(event.target.value))}
+                disabled={disabled}
+              />
+              <Input
+                label={t('routing_policy.global.max_retry_credentials')}
+                type="number"
+                min={0}
+                max={100}
+                value={globalSettings.maxRetryCredentials}
+                onChange={(event) => setGlobal('maxRetryCredentials', toNumber(event.target.value))}
+                disabled={disabled}
+              />
+              <Input
+                label={t('routing_policy.global.max_retry_interval')}
+                type="number"
+                min={0}
+                max={3600}
+                value={globalSettings.maxRetryInterval}
+                onChange={(event) => setGlobal('maxRetryInterval', toNumber(event.target.value))}
+                disabled={disabled}
+              />
+            </div>
+          </section>
+
+          <section className={styles.panel}>
+            <div className={styles.sectionHeader}>
+              <h2>{t('routing_policy.global.cooldown_title')}</h2>
+            </div>
+            <div className={styles.toggleGrid}>
+              <div className={styles.toggleField}>
+                <div>
+                  <strong>{t('routing_policy.global.cooling_enabled')}</strong>
+                  <span>{t('routing_policy.global.cooling_enabled_hint')}</span>
+                </div>
+                <ToggleSwitch
+                  checked={globalSettings.coolingEnabled}
+                  onChange={(value) => setGlobal('coolingEnabled', value)}
+                  disabled={disabled}
+                  ariaLabel={t('routing_policy.global.cooling_enabled')}
+                />
+              </div>
+              <div className={styles.toggleField}>
+                <div>
+                  <strong>{t('routing_policy.global.save_cooldown_status')}</strong>
+                  <span>{t('routing_policy.global.save_cooldown_status_hint')}</span>
+                </div>
+                <ToggleSwitch
+                  checked={globalSettings.saveCooldownStatus}
+                  onChange={(value) => setGlobal('saveCooldownStatus', value)}
+                  disabled={disabled}
+                  ariaLabel={t('routing_policy.global.save_cooldown_status')}
+                />
+              </div>
+            </div>
+            <div className={styles.singleField}>
+              <Input
+                label={t('routing_policy.global.transient_cooldown')}
+                hint={t('routing_policy.global.transient_cooldown_hint')}
+                type="number"
+                min={-1}
+                max={86400}
+                value={globalSettings.transientErrorCooldownSeconds}
+                onChange={(event) =>
+                  setGlobal('transientErrorCooldownSeconds', toNumber(event.target.value))
+                }
+                disabled={disabled}
+              />
+            </div>
+          </section>
+
+          <section className={styles.panel}>
+            <div className={styles.sectionHeader}>
+              <h2>{t('routing_policy.global.quota_title')}</h2>
+            </div>
+            <div className={styles.toggleGrid}>
+              {(
+                [
+                  ['quotaSwitchProject', 'quota_switch_project'],
+                  ['quotaSwitchPreviewModel', 'quota_switch_preview_model'],
+                  ['quotaAntigravityCredits', 'quota_antigravity_credits'],
+                ] as const
+              ).map(([key, label]) => (
+                <div className={styles.toggleField} key={key}>
+                  <div>
+                    <strong>{t(`routing_policy.global.${label}`)}</strong>
+                    <span>{t(`routing_policy.global.${label}_hint`)}</span>
+                  </div>
+                  <ToggleSwitch
+                    checked={globalSettings[key]}
+                    onChange={(value) => setGlobal(key, value)}
+                    disabled={disabled}
+                    ariaLabel={t(`routing_policy.global.${label}`)}
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
+
+      {activeView === 'providers' && (
+        <div className={styles.sectionStack}>
+          <section className={styles.protectionBar}>
+            <div className={styles.protectionMaster}>
+              <div>
+                <h2>{t('routing_policy.protection.title')}</h2>
+                <p>{t('routing_policy.protection.master_hint')}</p>
+              </div>
+              <ToggleSwitch
+                checked={requestProtection.enabled}
+                onChange={(value) => setProtection('enabled', value)}
+                disabled={disabled}
+                ariaLabel={t('routing_policy.protection.enabled')}
+              />
+            </div>
+            <div className={styles.modeSelect}>
+              <label>{t('routing_policy.protection.mode')}</label>
+              <Select
+                value={requestProtection.mode}
+                options={[
+                  { value: 'observe', label: t('routing_policy.mode_observe') },
+                  { value: 'enforce', label: t('routing_policy.mode_enforce') },
+                ]}
+                onChange={(value) =>
+                  setProtection('mode', value as RoutingRequestProtectionConfig['mode'])
+                }
+                disabled={disabled || !requestProtection.enabled}
+              />
+            </div>
+          </section>
+
+          <div className={styles.providerGrid}>
+            {ROUTING_POLICY_PROVIDERS.map((provider) => {
+              const policy = requestProtection.providers[provider];
+              return (
+                <section className={styles.providerCard} key={provider}>
+                  <div className={styles.providerHeader}>
+                    <div>
+                      <h2>{t(`routing_policy.providers.${provider}`)}</h2>
+                      <span>{provider}</span>
+                    </div>
+                    <ToggleSwitch
+                      checked={policy.enabled}
+                      onChange={(value) => setProviderPolicy(provider, 'enabled', value)}
+                      disabled={disabled || !requestProtection.enabled}
+                      ariaLabel={t('routing_policy.protection.provider_enabled', {
+                        provider: t(`routing_policy.providers.${provider}`),
+                      })}
+                    />
+                  </div>
+                  <div className={styles.providerFields}>
+                    <Input
+                      label={t('routing_policy.protection.status_codes')}
+                      hint={t('routing_policy.protection.status_codes_hint')}
+                      value={statusCodeInputs[provider]}
+                      onChange={(event) => {
+                        setStatusCodeInputs((current) => ({
+                          ...current,
+                          [provider]: event.target.value,
+                        }));
+                        setDirty(true);
+                      }}
+                      disabled={disabled || !policy.enabled}
+                      placeholder="429, 401, 403"
+                    />
+                    <div className={styles.compactFields}>
+                      <Input
+                        label={t('routing_policy.protection.confirmations')}
+                        type="number"
+                        min={1}
+                        max={5}
+                        value={policy.confirmations}
+                        onChange={(event) =>
+                          setProviderPolicy(provider, 'confirmations', toNumber(event.target.value))
+                        }
+                        disabled={disabled || !policy.enabled}
+                      />
+                      <Input
+                        label={t('routing_policy.protection.confirmation_window')}
+                        type="number"
+                        min={1}
+                        max={86400}
+                        value={policy.confirmationWindowSeconds}
+                        onChange={(event) =>
+                          setProviderPolicy(
+                            provider,
+                            'confirmationWindowSeconds',
+                            toNumber(event.target.value)
+                          )
+                        }
+                        disabled={disabled || !policy.enabled}
+                      />
+                      <Input
+                        label={t('routing_policy.protection.fallback_minutes')}
+                        type="number"
+                        min={0}
+                        max={10080}
+                        value={policy.fallbackDisableMinutes}
+                        onChange={(event) =>
+                          setProviderPolicy(
+                            provider,
+                            'fallbackDisableMinutes',
+                            toNumber(event.target.value)
+                          )
+                        }
+                        disabled={disabled || !policy.enabled || !policy.autoEnable}
+                      />
+                    </div>
+                    <div className={styles.providerToggles}>
+                      <div className={styles.toggleField}>
+                        <div>
+                          <strong>{t('routing_policy.protection.quota_evidence')}</strong>
+                          <span>{t('routing_policy.protection.quota_evidence_hint')}</span>
+                        </div>
+                        <ToggleSwitch
+                          checked={policy.requireQuotaEvidence}
+                          onChange={(value) =>
+                            setProviderPolicy(provider, 'requireQuotaEvidence', value)
+                          }
+                          disabled={disabled || !policy.enabled}
+                          ariaLabel={t('routing_policy.protection.quota_evidence')}
+                        />
+                      </div>
+                      <div className={styles.toggleField}>
+                        <div>
+                          <strong>{t('routing_policy.protection.auto_enable')}</strong>
+                          <span>{t('routing_policy.protection.auto_enable_hint')}</span>
+                        </div>
+                        <ToggleSwitch
+                          checked={policy.autoEnable}
+                          onChange={(value) => setProviderPolicy(provider, 'autoEnable', value)}
+                          disabled={disabled || !policy.enabled}
+                          ariaLabel={t('routing_policy.protection.auto_enable')}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {activeView === 'runtime' && (
+        <div className={styles.sectionStack}>
+          <section className={styles.panel}>
+            <div className={styles.sectionHeaderWithAction}>
+              <div>
+                <h2>{t('routing_policy.runtime.active_title')}</h2>
+                <p>{t('routing_policy.runtime.active_count', { count: data?.active.length ?? 0 })}</p>
+              </div>
+              <Button variant="secondary" size="sm" onClick={() => void refreshRuntime()}>
+                <IconRefreshCw size={15} /> {t('common.refresh')}
+              </Button>
+            </div>
+            {data?.active.length ? (
+              <div className={styles.tableScroller}>
+                <table className={styles.table}>
+                  <thead>
+                    <tr>
+                      <th>{t('routing_policy.runtime.provider')}</th>
+                      <th>{t('routing_policy.runtime.account')}</th>
+                      <th>{t('routing_policy.runtime.status_code')}</th>
+                      <th>{t('routing_policy.runtime.triggered_at')}</th>
+                      <th>{t('routing_policy.runtime.release_at')}</th>
+                      <th>{t('routing_policy.runtime.reason')}</th>
+                      <th aria-label={t('routing_policy.runtime.actions')} />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.active.map((account) => (
+                      <tr key={account.authIndex}>
+                        <td><span className={styles.providerTag}>{account.provider}</span></td>
+                        <td>
+                          <strong className={styles.accountName}>
+                            {account.fileName || account.authIndex}
+                          </strong>
+                          <span className={styles.accountIndex}>{account.authIndex}</span>
+                        </td>
+                        <td><span className={styles.statusCode}>{account.statusCode}</span></td>
+                        <td>{formatTimestamp(account.triggeredAt, i18n.language, '-')}</td>
+                        <td>{formatTimestamp(account.releaseAt, i18n.language, t('routing_policy.runtime.manual'))}</td>
+                        <td><span className={styles.reason} title={account.reason}>{account.reason || '-'}</span></td>
+                        <td>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            loading={releasing === account.authIndex}
+                            onClick={() => releaseAccount(account.authIndex, account.fileName)}
+                          >
+                            {t('routing_policy.release')}
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className={styles.inlineEmpty}>{t('routing_policy.runtime.no_active')}</div>
+            )}
+          </section>
+
+          <section className={styles.panel}>
+            <div className={styles.sectionHeaderWithAction}>
+              <div>
+                <h2>{t('routing_policy.runtime.events_title')}</h2>
+                <p>{t('routing_policy.runtime.events_count', { count: data?.recentEvents.length ?? 0 })}</p>
+              </div>
+            </div>
+            {data?.recentEvents.length ? (
+              <div className={styles.tableScroller}>
+                <table className={styles.table}>
+                  <thead>
+                    <tr>
+                      <th>{t('routing_policy.runtime.time')}</th>
+                      <th>{t('routing_policy.runtime.provider')}</th>
+                      <th>{t('routing_policy.runtime.account')}</th>
+                      <th>{t('routing_policy.runtime.status_code')}</th>
+                      <th>{t('routing_policy.runtime.action')}</th>
+                      <th>{t('routing_policy.runtime.confirmation')}</th>
+                      <th>{t('routing_policy.runtime.reason')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.recentEvents.map((event) => (
+                      <tr key={event.id}>
+                        <td>{formatTimestamp(event.triggeredAt, i18n.language, '-')}</td>
+                        <td><span className={styles.providerTag}>{event.provider}</span></td>
+                        <td><span className={styles.accountIndex}>{event.authIndex || event.authId || '-'}</span></td>
+                        <td>{event.statusCode ? <span className={styles.statusCode}>{event.statusCode}</span> : '-'}</td>
+                        <td>
+                          <span className={`${styles.actionTag} ${styles[`action_${event.action}`] ?? ''}`}>
+                            {t(`routing_policy.actions.${event.action}`, { defaultValue: event.action })}
+                          </span>
+                        </td>
+                        <td>{event.required ? `${event.count}/${event.required}` : '-'}</td>
+                        <td><span className={styles.reason} title={event.reason}>{event.reason || '-'}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className={styles.inlineEmpty}>{t('routing_policy.runtime.no_events')}</div>
+            )}
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}

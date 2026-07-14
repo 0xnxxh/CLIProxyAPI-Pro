@@ -135,6 +135,8 @@ CLIProxyAPI Pro 是对两个 upstream 项目的最小化定制层集合：
 
 账号巡检只由后端执行。管理端负责配置调度、启动和控制巡检、轮询状态/进度/结果，通过 WebSocket/WSS 接收日志和实时状态，并确认手动操作。后端自动动作支持连续确认门槛，quota cache 会记录解析器版本和返回结构 hash，便于上游字段变化时排查。
 
+管理端新增一级“路由策略”页面，统一配置 upstream 路由、会话粘性、重试、账号切换、冷却和配额回退，并为 Antigravity、xAI、Codex、Gemini CLI 提供按 HTTP 状态码触发的请求保护策略。保护功能默认关闭；可先使用 `observe` 模式观察命中情况，再切换到 `enforce` 自动禁用。自动解除只作用于本策略禁用的账号，不会覆盖用户手动禁用状态。
+
 后端巡检时，如果认证记录本来已经进入正常刷新窗口，会在配额/账号探测前尝试刷新 token。巡检刷新路径会跳过 API key 账号、未到刷新窗口的账号，以及仍受 `NextRefreshAfter` 限制的账号；disabled 账号允许刷新。刷新成功后使用刷新后的 auth 继续探测；刷新失败时保留该账号，并跳过该账号本次探测。
 
 后端启动时会强制 `usage-statistics-enabled=true` 和 `remote-management.panel-github-repository=https://github.com/ssfun/CLIProxyAPI-Pro`，并且只在加载到的配置不一致时同步回写 `config.yaml`。

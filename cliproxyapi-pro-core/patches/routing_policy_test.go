@@ -1,0 +1,130 @@
+package management
+
+import (
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+)
+
+func TestNormalizeRoutingRequestProtectionConfig(t *testing.T) {
+	got := normalizeRoutingRequestProtectionConfig(config.RequestProtectionConfig{
+		Mode: "ENFORCE",
+		Providers: map[string]config.RequestProtectionProviderPolicy{
+			"codex": {
+				StatusCodes:               []int{429, 429, 99, 600},
+				Confirmations:             9,
+				ConfirmationWindowSeconds: 0,
+				FallbackDisableMinutes:    20000,
+			},
+		},
+	})
+	if got.Mode != routingProtectionModeEnforce {
+		t.Fatalf("mode = %q", got.Mode)
+	}
+	codex := got.Providers["codex"]
+	if len(codex.StatusCodes) != 1 || codex.StatusCodes[0] != 429 {
+		t.Fatalf("status codes = %#v", codex.StatusCodes)
+	}
+	if codex.Confirmations != 5 {
+		t.Fatalf("confirmations = %d", codex.Confirmations)
+	}
+	if codex.ConfirmationWindowSeconds != 600 {
+		t.Fatalf("confirmation window = %d", codex.ConfirmationWindowSeconds)
+	}
+	if codex.FallbackDisableMinutes != 10080 {
+		t.Fatalf("fallback minutes = %d", codex.FallbackDisableMinutes)
+	}
+	for _, provider := range routingProtectionProviders {
+		if _, ok := got.Providers[provider]; !ok {
+			t.Fatalf("provider %s missing", provider)
+		}
+	}
+}
+
+func TestRoutingProtectionHasQuotaEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		record coreusage.Record
+		want   bool
+	}{
+		{
+			name:   "retry after",
+			record: coreusage.Record{ResponseHeaders: http.Header{"Retry-After": []string{"30"}}},
+			want:   true,
+		},
+		{
+			name:   "codex usage percent",
+			record: coreusage.Record{ResponseHeaders: http.Header{"X-Codex-Primary-Used-Percent": []string{"100"}}},
+			want:   true,
+		},
+		{
+			name:   "body marker",
+			record: coreusage.Record{Fail: coreusage.Failure{Body: `{"error":{"type":"usage_limit_reached"}}`}},
+			want:   true,
+		},
+		{name: "generic 429", record: coreusage.Record{}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := routingProtectionHasQuotaEvidence(test.record); got != test.want {
+				t.Fatalf("got %v want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRoutingProtectionReleaseAtPrefersLatestSignal(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	record := coreusage.Record{
+		ResponseHeaders: http.Header{
+			"Retry-After":                []string{"60"},
+			"X-Codex-Primary-Reset-At":   []string{"1700000120"},
+			"X-Codex-Secondary-Reset-At": []string{"1700000300"},
+		},
+		Fail: coreusage.Failure{Body: `{"error":{"resets_in_seconds":180}}`},
+	}
+	got := routingProtectionReleaseAt(record, config.RequestProtectionProviderPolicy{AutoEnable: true}, now)
+	want := now.Add(5 * time.Minute)
+	if !got.Equal(want) {
+		t.Fatalf("release at = %v want %v", got, want)
+	}
+}
+
+func TestRoutingProtectionReleaseAtFallback(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	got := routingProtectionReleaseAt(coreusage.Record{}, config.RequestProtectionProviderPolicy{
+		AutoEnable:             true,
+		FallbackDisableMinutes: 45,
+	}, now)
+	if want := now.Add(45 * time.Minute); !got.Equal(want) {
+		t.Fatalf("release at = %v want %v", got, want)
+	}
+}
+
+func TestManualDisabledStateClearsRoutingProtectionOwnership(t *testing.T) {
+	auth := &coreauth.Auth{
+		Disabled: true,
+		Metadata: map[string]any{
+			"disabled": true,
+			routingProtectionMetadataKey: map[string]any{
+				"owner": routingProtectionOwner,
+			},
+		},
+	}
+	if !routingProtectionOwned(auth) {
+		t.Fatal("auth should initially be owned by request protection")
+	}
+
+	applyAuthDisabledState(auth, true)
+
+	if !auth.Disabled {
+		t.Fatal("manual disabled state should be preserved")
+	}
+	if routingProtectionOwned(auth) {
+		t.Fatal("manual status change must clear request protection ownership")
+	}
+}

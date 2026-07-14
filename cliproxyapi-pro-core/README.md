@@ -140,6 +140,20 @@ internal/embeddedusage
 
 如需自定义，可设置 `ACCOUNT_INSPECTION_SCHEDULE_PATH`。
 
+### 路由策略与请求状态保护
+
+补丁层在 management API 下增加统一路由策略接口：
+
+- `GET /v0/management/routing-policy`
+- `PUT|PATCH /v0/management/routing-policy`
+- `POST /v0/management/routing-policy/release`
+
+接口聚合 upstream 的路由策略、会话粘性、请求重试、账号切换、冷却、配额回退和 Codex 身份混淆配置，并增加 `routing.request-protection` 请求状态保护配置。第一期支持 Antigravity、xAI、Codex 和 Gemini CLI。
+
+请求状态保护默认关闭，模式默认为 `observe`。启用后可按 provider 配置 HTTP 状态码、连续确认次数、确认窗口、429 配额证据、自动解除和兜底禁用时长。`enforce` 模式达到门槛后会禁用对应认证记录，并写入 `request_protection` 归属元数据；自动解除和管理端手动解除只处理由该策略禁用的账号，不会重新启用用户手动禁用或由其他模块禁用的账号。
+
+自动解除时间优先读取 `Retry-After`、Codex reset headers、响应体 `resets_at` / `resets_in_seconds`，无法解析时使用 provider 的兜底禁用时长。运行状态接口同时返回当前受保护账号和进程内最近事件。
+
 ### 根路径跳转和 health 响应
 
 补丁层还修改了 upstream API 行为：
@@ -173,6 +187,8 @@ https://github.com/ssfun/CLIProxyAPI-Pro
 - `embeddedusage/` — 内嵌 SQLite usage service 和 management routes。
 - `patches/apply_upstream_patches.py` — Docker build 阶段 patch upstream 源码。
 - `patches/account_inspection_scheduler.go` — 注入 upstream management handlers 的后端账号巡检调度器。
+- `patches/routing_policy.go` — 注入统一路由配置和请求状态保护 handlers、usage plugin 与自动解除任务。
+- `patches/routing_protection_config.go` — 注入 `routing.request-protection` 配置类型。
 - `.github/workflows/release-core.yml` — 镜像发布、Pro 二进制资产、management.html 发布、usage 备份、Render 部署触发、Telegram 通知和 workflow 清理。
 
 ## Docker 构建

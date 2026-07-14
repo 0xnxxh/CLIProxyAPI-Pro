@@ -167,6 +167,21 @@ replace_once(
     f'DefaultPanelGitHubRepository = "{PRO_PANEL_REPOSITORY}"',
 )
 
+routing_protection_config = ROOT / 'internal/config/routing_protection_config.go'
+write_text(routing_protection_config, read_text(Path(__file__).resolve().parent / 'routing_protection_config.go'))
+replace_once(
+    config_go,
+    '''\tSessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+}
+''',
+    '''\tSessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+\t// RequestProtection controls request-driven provider credential disabling.
+\tRequestProtection RequestProtectionConfig `yaml:"request-protection,omitempty" json:"request-protection,omitempty"`
+}
+''',
+)
+
 config_example = ROOT / 'config.example.yaml'
 replace_once(
     config_example,
@@ -1148,6 +1163,8 @@ auth_files = ROOT / 'internal/api/handlers/management/auth_files.go'
 api_tools = ROOT / 'internal/api/handlers/management/api_tools.go'
 management_scheduler = ROOT / 'internal/api/handlers/management/account_inspection_scheduler.go'
 management_scheduler_test = ROOT / 'internal/api/handlers/management/account_inspection_scheduler_test.go'
+routing_policy = ROOT / 'internal/api/handlers/management/routing_policy.go'
+routing_policy_test = ROOT / 'internal/api/handlers/management/routing_policy_test.go'
 scheduler_source = Path('/tmp/account_inspection_scheduler.go')
 if not scheduler_source.is_file():
     scheduler_source = Path(__file__).resolve().parent / 'account_inspection_scheduler.go'
@@ -1155,6 +1172,51 @@ write_text(management_scheduler, re.sub(r'github\.com/router-for-me/CLIProxyAPI/
 scheduler_test_source = Path(__file__).resolve().parent / 'account_inspection_scheduler_test.go'
 if scheduler_test_source.is_file():
     write_text(management_scheduler_test, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(scheduler_test_source)))
+write_text(routing_policy, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'routing_policy.go')))
+write_text(routing_policy_test, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'routing_policy_test.go')))
+
+replace_once(
+    auth_files,
+    '''\tmetadata["disabled"] = disabled
+\traw, errMarshal := json.Marshal(metadata)
+''',
+    '''\tmetadata["disabled"] = disabled
+\tdelete(metadata, routingProtectionMetadataKey)
+\traw, errMarshal := json.Marshal(metadata)
+''',
+)
+replace_once(
+    auth_files,
+    '''\tif auth.Metadata == nil {
+\t\tauth.Metadata = make(map[string]any)
+\t}
+\tauth.Metadata["disabled"] = disabled
+}
+''',
+    '''\tif auth.Metadata == nil {
+\t\tauth.Metadata = make(map[string]any)
+\t}
+\tauth.Metadata["disabled"] = disabled
+\tclearRoutingProtectionOwnership(auth)
+}
+''',
+)
+replace_once(
+    auth_files,
+    '''func syncAuthFileDisabledState(auth *coreauth.Auth) {
+\tif auth == nil {
+\t\treturn
+\t}
+\tdisabled, ok := authFileBoolValue(auth.Metadata["disabled"])
+''',
+    '''func syncAuthFileDisabledState(auth *coreauth.Auth) {
+\tif auth == nil {
+\t\treturn
+\t}
+\tdisabled, ok := authFileBoolValue(auth.Metadata["disabled"])
+\tclearRoutingProtectionOwnership(auth)
+''',
+)
 
 replace_once(
     api_tools,
@@ -1688,7 +1750,7 @@ replace_once(
 replace_once(
     server,
     '''\t\tmgmt.POST("/api-call", s.mgmt.APICall)\n''',
-    '''\t\tmgmt.POST("/api-call", s.mgmt.APICall)\n\t\ts.mgmt.RegisterAccountInspectionRoutes(mgmt)\n''',
+    '''\t\tmgmt.POST("/api-call", s.mgmt.APICall)\n\t\ts.mgmt.RegisterAccountInspectionRoutes(mgmt)\n\t\ts.mgmt.RegisterRoutingPolicyRoutes(mgmt)\n''',
 )
 
 handler = ROOT / 'internal/api/handlers/management/handler.go'
@@ -1989,6 +2051,9 @@ subprocess.run([
     'cmd/server/main.go',
     'internal/logging/requestid.go',
     'internal/logging/requestmeta.go',
+    'internal/api/handlers/management/routing_policy.go',
+    'internal/api/handlers/management/routing_policy_test.go',
+    'internal/config/routing_protection_config.go',
     'internal/pluginhost/gemini_cli_storage_compat.go',
     'internal/pluginhost/gemini_cli_storage_compat_test.go',
     'internal/pluginstore/autoinstall.go',

@@ -359,6 +359,7 @@ func (h *Handler) startAccountInspectionScheduler() {
 		embeddedusage.SetAccountInspectionScheduleHandlers(scheduler.exportSchedule, scheduler.importSchedule)
 		go scheduler.loop()
 	}
+	startRoutingPolicyController(h)
 }
 
 func schedulerForHandler(h *Handler) *accountInspectionScheduler {
@@ -2824,6 +2825,11 @@ func writePluginVirtualManagedMetadataToSourceFile(sourcePath string, auth *core
 	}
 	if value, ok := auth.Metadata["quota_cache"]; ok {
 		source["quota_cache"] = value
+	}
+	if value, ok := auth.Metadata[routingProtectionMetadataKey]; ok {
+		source[routingProtectionMetadataKey] = value
+	} else {
+		delete(source, routingProtectionMetadataKey)
 	}
 	raw, err := json.Marshal(source)
 	if err != nil {

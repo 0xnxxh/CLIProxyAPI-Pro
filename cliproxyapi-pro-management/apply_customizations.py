@@ -281,12 +281,12 @@ def patch_routes(target: Path) -> None:
     replace_once(
         path,
         "import { QuotaPage } from '@/pages/QuotaPage';\n",
-        "import { QuotaPage } from '@/pages/QuotaPage';\nimport { MonitoringCenterPage } from '@/pages/MonitoringCenterPage';\nimport { AccountInspectionPage } from '@/pages/AccountInspectionPage';\n",
+        "import { QuotaPage } from '@/pages/QuotaPage';\nimport { MonitoringCenterPage } from '@/pages/MonitoringCenterPage';\nimport { AccountInspectionPage } from '@/pages/AccountInspectionPage';\nimport { RoutingPolicyPage } from '@/pages/RoutingPolicyPage';\n",
     )
     replace_once(
         path,
         "  { path: '/quota', element: <QuotaPage /> },\n",
-        "  { path: '/quota', element: <QuotaPage /> },\n  { path: '/monitoring', element: <MonitoringCenterPage /> },\n  { path: '/account-inspection', element: <AccountInspectionPage /> },\n",
+        "  { path: '/quota', element: <QuotaPage /> },\n  { path: '/monitoring', element: <MonitoringCenterPage /> },\n  { path: '/account-inspection', element: <AccountInspectionPage /> },\n  { path: '/routing', element: <RoutingPolicyPage /> },\n",
     )
 
 
@@ -301,13 +301,13 @@ def patch_layout(target: Path) -> None:
     insert_once(
         path,
         "  IconSidebarProviders,\n",
-        "  IconSidebarAccountInspection,\n  IconSidebarMonitor,\n  IconSidebarProviders,\n",
+        "  IconSidebarAccountInspection,\n  IconSidebarMonitor,\n  IconSidebarRouting,\n  IconSidebarProviders,\n",
         "  IconSidebarAccountInspection,\n",
     )
     replace_once(
         path,
         "  oauth: <IconSidebarOauth size={18} />,\n  quota: <IconSidebarQuota size={18} />,\n",
-        "  oauth: <IconSidebarOauth size={18} />,\n  quota: <IconSidebarQuota size={18} />,\n  monitoring: <IconSidebarMonitor size={18} />,\n  accountInspection: <IconSidebarAccountInspection size={18} />,\n",
+        "  oauth: <IconSidebarOauth size={18} />,\n  quota: <IconSidebarQuota size={18} />,\n  monitoring: <IconSidebarMonitor size={18} />,\n  accountInspection: <IconSidebarAccountInspection size={18} />,\n  routing: <IconSidebarRouting size={18} />,\n",
     )
     text = read(path)
     if "path: '/monitoring'" not in text:
@@ -354,6 +354,44 @@ def patch_layout(target: Path) -> None:
             )
         else:
             raise RuntimeError(f'Pattern not found in {path}: quota navigation item')
+    text = read(path)
+    if "path: '/routing'" not in text:
+        flat_auth_item = "    { path: '/auth-files', label: t('nav.auth_files'), icon: sidebarIcons.authFiles },\n"
+        grouped_auth_item = (
+            "        {\n"
+            "          path: '/auth-files',\n"
+            "          labelKey: 'nav.auth_files',\n"
+            "          metaKey: 'nav_meta.auth_files',\n"
+            "          icon: sidebarIcons.authFiles,\n"
+            "        },\n"
+        )
+        if flat_auth_item in text:
+            write(
+                path,
+                text.replace(
+                    flat_auth_item,
+                    flat_auth_item
+                    + "    { path: '/routing', label: t('nav.routing_policy'), icon: sidebarIcons.routing },\n",
+                    1,
+                ),
+            )
+        elif grouped_auth_item in text:
+            write(
+                path,
+                text.replace(
+                    grouped_auth_item,
+                    grouped_auth_item
+                    + "        {\n"
+                    + "          path: '/routing',\n"
+                    + "          labelKey: 'nav.routing_policy',\n"
+                    + "          metaKey: 'nav_meta.routing_policy',\n"
+                    + "          icon: sidebarIcons.routing,\n"
+                    + "        },\n",
+                    1,
+                ),
+            )
+        else:
+            raise RuntimeError(f'Pattern not found in {path}: auth files navigation item')
     replace_once_if_present(
         path,
         "        {\n"
@@ -416,11 +454,27 @@ def patch_icons(target: Path) -> None:
         "  );\n"
         "}\n\n"
     )
+    routing_icon = (
+        "export function IconSidebarRouting({ size = 20, ...props }: IconProps) {\n"
+        "  return (\n"
+        f"    <svg {{...{svg_props}}} width={{size}} height={{size}} {{...props}}>\n"
+        "      <circle cx=\"6\" cy=\"6\" r=\"2\" />\n"
+        "      <circle cx=\"18\" cy=\"6\" r=\"2\" />\n"
+        "      <circle cx=\"12\" cy=\"18\" r=\"2\" />\n"
+        "      <path d=\"M8 6h8\" />\n"
+        "      <path d=\"m7.5 7.5 3.2 7.2\" />\n"
+        "      <path d=\"m16.5 7.5-3.2 7.2\" />\n"
+        "    </svg>\n"
+        "  );\n"
+        "}\n\n"
+    )
     icons_to_insert = ""
     if "export function IconSidebarMonitor" not in text:
         icons_to_insert += monitor_icon
     if "export function IconSidebarAccountInspection" not in text:
         icons_to_insert += account_inspection_icon
+    if "export function IconSidebarRouting" not in text:
+        icons_to_insert += routing_icon
     if not icons_to_insert:
         return
     for marker in (
@@ -1335,7 +1389,7 @@ def patch_supporting_api_and_types(target: Path) -> None:
     replace_once(
         api_index_path,
         "export * from './apiCall';\n",
-        "export * from './apiCall';\nexport * from './accountInspection';\n",
+        "export * from './apiCall';\nexport * from './accountInspection';\nexport * from './routingPolicy';\n",
     )
 
     format_path = target / 'src/utils/format.ts'
@@ -1417,11 +1471,13 @@ def patch_locales(target: Path) -> None:
                 {
                     'monitoring_center': nav_additions.get('monitoring_center', 'Request Monitoring'),
                     'account_inspection': nav_additions.get('account_inspection', 'Account Inspection'),
+                    'routing_policy': nav_additions.get('routing_policy', 'Routing Policy'),
                 },
             )
         )
         data['monitoring'] = additions.get('monitoring', data.get('monitoring', {}))
         data['usage_stats'] = additions.get('usage_stats', data.get('usage_stats', {}))
+        data['routing_policy'] = additions.get('routing_policy', data.get('routing_policy', {}))
         data.setdefault('quota_management', {}).update(QUOTA_LOCALE_KEYS.get(locale_path.name, {}))
         gemini_cli_locale = GEMINI_CLI_LOCALE_KEYS.get(locale_path.name, GEMINI_CLI_LOCALE_KEYS['en.json'])
         data.setdefault('auth_files', {})['filter_gemini-cli'] = gemini_cli_locale['auth_filter']
