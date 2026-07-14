@@ -5,6 +5,12 @@ export const ROUTING_POLICY_PROVIDERS = [
   'xai',
   'codex',
   'gemini-cli',
+  'gemini',
+  'gemini-interactions',
+  'vertex',
+  'aistudio',
+  'claude',
+  'kimi',
 ] as const;
 
 export type RoutingPolicyProvider = (typeof ROUTING_POLICY_PROVIDERS)[number];

@@ -2,6 +2,7 @@ package management
 
 import (
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -9,6 +10,24 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
+
+func TestRoutingProtectionProviders(t *testing.T) {
+	want := []string{
+		"antigravity",
+		"xai",
+		"codex",
+		"gemini-cli",
+		"gemini",
+		"gemini-interactions",
+		"vertex",
+		"aistudio",
+		"claude",
+		"kimi",
+	}
+	if !reflect.DeepEqual(routingProtectionProviders, want) {
+		t.Fatalf("providers = %#v want %#v", routingProtectionProviders, want)
+	}
+}
 
 func TestNormalizeRoutingRequestProtectionConfig(t *testing.T) {
 	got := normalizeRoutingRequestProtectionConfig(config.RequestProtectionConfig{

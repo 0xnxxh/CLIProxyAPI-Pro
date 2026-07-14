@@ -881,7 +881,13 @@
         "antigravity": "Antigravity",
         "xai": "xAI",
         "codex": "Codex",
-        "gemini-cli": "Gemini CLI"
+        "gemini-cli": "Gemini CLI",
+        "gemini": "Gemini",
+        "gemini-interactions": "Gemini Interactions",
+        "vertex": "Vertex AI",
+        "aistudio": "AI Studio",
+        "claude": "Claude",
+        "kimi": "Kimi"
       },
       "global": {
         "routing_title": "Routing and Session Affinity",
@@ -1838,7 +1844,13 @@
         "antigravity": "Antigravity",
         "xai": "xAI",
         "codex": "Codex",
-        "gemini-cli": "Gemini CLI"
+        "gemini-cli": "Gemini CLI",
+        "gemini": "Gemini",
+        "gemini-interactions": "Gemini Interactions",
+        "vertex": "Vertex AI",
+        "aistudio": "AI Studio",
+        "claude": "Claude",
+        "kimi": "Kimi"
       },
       "global": {
         "routing_title": "Маршрутизация и привязка сессии",
@@ -2795,7 +2807,13 @@
         "antigravity": "Antigravity",
         "xai": "xAI",
         "codex": "Codex",
-        "gemini-cli": "Gemini CLI"
+        "gemini-cli": "Gemini CLI",
+        "gemini": "Gemini",
+        "gemini-interactions": "Gemini Interactions",
+        "vertex": "Vertex AI",
+        "aistudio": "AI Studio",
+        "claude": "Claude",
+        "kimi": "Kimi"
       },
       "global": {
         "routing_title": "路由与会话粘性",
@@ -3752,7 +3770,13 @@
         "antigravity": "Antigravity",
         "xai": "xAI",
         "codex": "Codex",
-        "gemini-cli": "Gemini CLI"
+        "gemini-cli": "Gemini CLI",
+        "gemini": "Gemini",
+        "gemini-interactions": "Gemini Interactions",
+        "vertex": "Vertex AI",
+        "aistudio": "AI Studio",
+        "claude": "Claude",
+        "kimi": "Kimi"
       },
       "global": {
         "routing_title": "路由與工作階段黏性",

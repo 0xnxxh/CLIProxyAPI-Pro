@@ -28,7 +28,18 @@ const (
 
 var routingPolicyControllers sync.Map
 
-var routingProtectionProviders = []string{"antigravity", "xai", "codex", "gemini-cli"}
+var routingProtectionProviders = []string{
+	"antigravity",
+	"xai",
+	"codex",
+	"gemini-cli",
+	"gemini",
+	"gemini-interactions",
+	"vertex",
+	"aistudio",
+	"claude",
+	"kimi",
+}
 
 type routingPolicyController struct {
 	h             *Handler

@@ -148,7 +148,7 @@ internal/embeddedusage
 - `PUT|PATCH /v0/management/routing-policy`
 - `POST /v0/management/routing-policy/release`
 
-接口聚合 upstream 的路由策略、会话粘性、请求重试、账号切换、冷却、配额回退和 Codex 身份混淆配置，并增加 `routing.request-protection` 请求状态保护配置。第一期支持 Antigravity、xAI、Codex 和 Gemini CLI。
+接口聚合 upstream 的路由策略、会话粘性、请求重试、账号切换、冷却、配额回退和 Codex 身份混淆配置，并增加 `routing.request-protection` 请求状态保护配置。内置 provider 支持 Antigravity、xAI、Codex、Gemini CLI、Gemini、Gemini Interactions、Vertex AI、AI Studio、Claude 和 Kimi。
 
 请求状态保护默认关闭，模式默认为 `observe`。启用后可按 provider 配置 HTTP 状态码、连续确认次数、确认窗口、429 配额证据、自动解除和兜底禁用时长。`enforce` 模式达到门槛后会禁用对应认证记录，并写入 `request_protection` 归属元数据；自动解除和管理端手动解除只处理由该策略禁用的账号，不会重新启用用户手动禁用或由其他模块禁用的账号。
 

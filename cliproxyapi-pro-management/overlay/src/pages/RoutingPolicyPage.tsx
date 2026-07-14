@@ -72,7 +72,10 @@ export function RoutingPolicyPage() {
   const [requestProtection, setRequestProtection] =
     useState<RoutingRequestProtectionConfig | null>(null);
   const [statusCodeInputs, setStatusCodeInputs] = useState<Record<RoutingPolicyProvider, string>>(
-    () => ({ antigravity: '', xai: '', codex: '', 'gemini-cli': '' })
+    () =>
+      Object.fromEntries(
+        ROUTING_POLICY_PROVIDERS.map((provider) => [provider, ''])
+      ) as Record<RoutingPolicyProvider, string>
   );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
