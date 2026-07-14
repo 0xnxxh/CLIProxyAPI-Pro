@@ -3107,7 +3107,7 @@
 }
 
 .priceRuleEditorHeader > div:first-child > span,
-.priceSyncHeader span {
+.priceSyncHeader > div:first-child > div > span {
   color: var(--monitor-muted);
   font-size: 12px;
 }
@@ -3377,6 +3377,7 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
+  color: inherit;
   line-height: 1;
 }
 
