@@ -2325,11 +2325,11 @@ export function AccountInspectionPage() {
   }, [authFileStats, selectedAssetProvider]);
 
   const selectedAssetLabel = selectedAssetProvider === 'all'
-    ? t('monitoring.account_inspection_account_summary_title')
+    ? t('monitoring.filter_all_accounts')
     : resolveProviderDisplayLabel(selectedAssetProvider);
-  const selectedAssetExportLabel = selectedAssetProvider === ACCOUNT_INSPECTION_ALL_PROVIDER_TYPE
-    ? t('monitoring.filter_all_providers')
-    : selectedAssetLabel;
+  const exportAuthFilesLabel = selectedAssetProvider === ACCOUNT_INSPECTION_ALL_PROVIDER_TYPE
+    ? t('monitoring.account_inspection_auth_files_export_all')
+    : t('monitoring.account_inspection_auth_files_export_selected', { provider: selectedAssetLabel });
 
   const accountAssetCards = useMemo<SummaryCard[]>(() => [
     {
@@ -2734,21 +2734,19 @@ export function AccountInspectionPage() {
                 <h3>{t('monitoring.account_inspection_provider_distribution_title')}</h3>
                 <p>{authFileStatsReady ? t('monitoring.account_inspection_provider_distribution_desc', { count: authFileStats.providerCount }) : t('common.loading')}</p>
               </div>
-              <div className={styles.providerDistributionActions}>
-                <span className={styles.providerDistributionSelection}>{selectedAssetLabel}</span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className={styles.providerExportButton}
-                  onClick={handleExportAuthFiles}
-                  loading={exportingAuthFiles}
-                  disabled={exportingAuthFiles || connectionStatus !== 'connected'}
-                  aria-label={t('monitoring.account_inspection_auth_files_export_selected', { provider: selectedAssetExportLabel })}
-                  title={t('monitoring.account_inspection_auth_files_export_selected', { provider: selectedAssetExportLabel })}
-                >
-                  {exportingAuthFiles ? null : <IconDownload size={16} />}
-                </Button>
-              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                className={styles.providerDistributionSelection}
+                onClick={handleExportAuthFiles}
+                loading={exportingAuthFiles}
+                disabled={exportingAuthFiles || connectionStatus !== 'connected'}
+                aria-label={exportAuthFilesLabel}
+                title={exportAuthFilesLabel}
+              >
+                {exportingAuthFiles ? null : <IconDownload size={15} />}
+                {exportAuthFilesLabel}
+              </Button>
             </div>
             <div className={styles.providerSelectorList}>
               <button
@@ -2761,7 +2759,7 @@ export function AccountInspectionPage() {
                 <div>
                   <span className={styles.providerSelectorTitle}>
                     <span className={styles.providerLogoFallback} aria-hidden="true">Σ</span>
-                    <strong>{t('monitoring.account_inspection_account_summary_title')}</strong>
+                    <strong>{t('monitoring.filter_all_accounts')}</strong>
                   </span>
                   <span>{authFileStatsReady ? `${authFileStats.total} ${t('monitoring.account_inspection_account_total')}` : t('common.loading')}</span>
                 </div>
