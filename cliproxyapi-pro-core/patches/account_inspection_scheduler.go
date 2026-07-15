@@ -2672,6 +2672,7 @@ func setAuthInspectionDisabledState(auth *coreauth.Auth, disabled bool) {
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
+	clearRoutingProtectionOwnership(auth)
 	auth.Metadata["disabled"] = disabled
 	if disabled {
 		auth.Status = coreauth.StatusDisabled

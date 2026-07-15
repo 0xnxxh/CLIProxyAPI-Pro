@@ -1,9 +1,11 @@
 package management
 
 import (
+	"context"
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +237,59 @@ func TestManualDisabledStateClearsRoutingProtectionOwnership(t *testing.T) {
 	}
 	if routingProtectionOwned(auth) {
 		t.Fatal("manual status change must clear request protection ownership")
+	}
+}
+
+func TestInspectionStateChangeClearsRoutingProtectionOwnership(t *testing.T) {
+	for _, disabled := range []bool{true, false} {
+		t.Run(strconv.FormatBool(disabled), func(t *testing.T) {
+			auth := &coreauth.Auth{
+				Disabled: !disabled,
+				Metadata: map[string]any{
+					routingProtectionMetadataKey: map[string]any{
+						"owner": routingProtectionOwner,
+					},
+				},
+			}
+			setAuthInspectionDisabledState(auth, disabled)
+			if auth.Disabled != disabled {
+				t.Fatalf("disabled = %v want %v", auth.Disabled, disabled)
+			}
+			if routingProtectionOwned(auth) {
+				t.Fatal("account inspection must take ownership from request protection")
+			}
+		})
+	}
+}
+
+func TestRoutingProtectionDisableRestoresOwnership(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	registered, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "routing-owned-auth",
+		Provider: "xai",
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	controller := &routingPolicyController{h: &Handler{authManager: manager}}
+	err = controller.disableAuth(context.Background(), registered, routingProtectionEvent{
+		Provider:    "xai",
+		StatusCode:  http.StatusTooManyRequests,
+		Reason:      "quota exhausted",
+		TriggeredAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("disable auth: %v", err)
+	}
+	updated, ok := manager.GetByID(registered.ID)
+	if !ok || updated == nil {
+		t.Fatal("updated auth missing")
+	}
+	if !updated.Disabled {
+		t.Fatal("routing protection should disable auth")
+	}
+	if !routingProtectionOwned(updated) {
+		t.Fatal("routing protection should restore its ownership metadata")
 	}
 }
 
