@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -1229,6 +1230,112 @@ func TestClassifyXAIDeepProbeResponse(t *testing.T) {
 				t.Fatalf("classifyXAIDeepProbeResponse() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunXAIDeepProbeWithRetryRecoversFromEmptyResponse(t *testing.T) {
+	attempts := 0
+	resp, status, message, err := runXAIDeepProbeWithRetry(context.Background(), 0, 0, func() (accountInspectionHTTPResult, error) {
+		attempts++
+		if attempts == 1 {
+			return accountInspectionHTTPResult{StatusCode: http.StatusOK}, nil
+		}
+		return accountInspectionHTTPResult{
+			StatusCode: http.StatusOK,
+			Body:       `data: {"type":"response.completed","response":{"status":"completed"}}` + "\n\n",
+		}, nil
+	})
+	if err != nil || status != accountInspectionDeepProbeSuccess || message != "" {
+		t.Fatalf("runXAIDeepProbeWithRetry() = resp:%+v status:%q message:%q err:%v, want success", resp, status, message, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("runXAIDeepProbeWithRetry() attempts = %d, want 2", attempts)
+	}
+}
+
+func TestRunXAIDeepProbeWithRetryRecoversFromTransportError(t *testing.T) {
+	attempts := 0
+	_, status, _, err := runXAIDeepProbeWithRetry(context.Background(), 0, 0, func() (accountInspectionHTTPResult, error) {
+		attempts++
+		if attempts == 1 {
+			return accountInspectionHTTPResult{}, errors.New("temporary transport failure")
+		}
+		return accountInspectionHTTPResult{
+			StatusCode: http.StatusOK,
+			Body:       `data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}` + "\n\n",
+		}, nil
+	})
+	if err != nil || status != accountInspectionDeepProbeSuccess || attempts != 2 {
+		t.Fatalf("runXAIDeepProbeWithRetry() = status:%q attempts:%d err:%v, want success after 2 attempts", status, attempts, err)
+	}
+}
+
+func TestRunXAIDeepProbeWithRetryDoesNotRetryContentFilter(t *testing.T) {
+	attempts := 0
+	_, status, message, err := runXAIDeepProbeWithRetry(context.Background(), 0, 0, func() (accountInspectionHTTPResult, error) {
+		attempts++
+		return accountInspectionHTTPResult{
+			StatusCode: http.StatusOK,
+			Body:       `data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}` + "\n\n",
+		}, nil
+	})
+	if err != nil || status != accountInspectionDeepProbeTransientError || !strings.Contains(message, "content_filter") {
+		t.Fatalf("runXAIDeepProbeWithRetry() = status:%q message:%q err:%v, want content_filter transient error", status, message, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("runXAIDeepProbeWithRetry() attempts = %d, want 1", attempts)
+	}
+}
+
+func TestAcquireXAIDeepProbeSerializesAndHonorsCancellation(t *testing.T) {
+	scheduler := &accountInspectionScheduler{}
+	releaseFirst, err := scheduler.acquireXAIDeepProbe(context.Background())
+	if err != nil {
+		t.Fatalf("first acquireXAIDeepProbe() error = %v", err)
+	}
+
+	secondAcquired := make(chan func(), 1)
+	secondStarted := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		release, acquireErr := scheduler.acquireXAIDeepProbe(context.Background())
+		if acquireErr == nil {
+			secondAcquired <- release
+		}
+	}()
+	<-secondStarted
+	select {
+	case release := <-secondAcquired:
+		release()
+		releaseFirst()
+		t.Fatal("second xAI deep probe acquired before the first probe released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	canceledResult := make(chan error, 1)
+	go func() {
+		_, acquireErr := scheduler.acquireXAIDeepProbe(canceledCtx)
+		canceledResult <- acquireErr
+	}()
+	cancel()
+	select {
+	case acquireErr := <-canceledResult:
+		if !errors.Is(acquireErr, context.Canceled) {
+			releaseFirst()
+			t.Fatalf("canceled acquireXAIDeepProbe() error = %v, want context.Canceled", acquireErr)
+		}
+	case <-time.After(time.Second):
+		releaseFirst()
+		t.Fatal("canceled acquireXAIDeepProbe() did not return")
+	}
+
+	releaseFirst()
+	select {
+	case release := <-secondAcquired:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("second xAI deep probe did not acquire after release")
 	}
 }
 

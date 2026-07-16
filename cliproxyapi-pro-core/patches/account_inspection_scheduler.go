@@ -42,6 +42,8 @@ const (
 	accountInspectionMaxRunDuration         = 30 * time.Minute
 	accountInspectionMaxProviderConcurrency = 2
 	accountInspectionMaxRefreshConcurrency  = 2
+	accountInspectionXAIMinAttempts         = 2
+	accountInspectionXAIRetryDelay          = 300 * time.Millisecond
 	accountInspectionWebSocketWriteTimeout  = 5 * time.Second
 	accountInspectionWebSocketPongWait      = 60 * time.Second
 	accountInspectionWebSocketPingPeriod    = 54 * time.Second
@@ -300,6 +302,8 @@ type accountInspectionScheduler struct {
 	autoActionConfirmations map[string]int
 	subscribers             map[chan accountInspectionLogStreamMessage]struct{}
 	lastProgressBroadcastAt int64
+	xaiDeepProbeOnce        sync.Once
+	xaiDeepProbeGate        chan struct{}
 }
 
 type accountInspectionAccount struct {
@@ -2599,8 +2603,14 @@ func (s *accountInspectionScheduler) applyXAIDeepProbe(ctx context.Context, acco
 		return decision, quotaStatus, nil
 	}
 
+	release, err := s.acquireXAIDeepProbe(ctx)
+	if err != nil {
+		return decision, quotaStatus, err
+	}
+	defer release()
+
 	s.appendLog("info", fmt.Sprintf("%s xAI 深度检测开始：%s", account.identity(), model))
-	resp, err := s.withRetry(ctx, settings.Retries, func() (accountInspectionHTTPResult, error) {
+	resp, status, message, err := runXAIDeepProbeWithRetry(ctx, settings.Retries, accountInspectionXAIRetryDelay, func() (accountInspectionHTTPResult, error) {
 		return s.apiCall(ctx, account.Auth, http.MethodPost, xaiResponsesURL(account.Auth), map[string]string{
 			"Authorization": "Bearer $TOKEN$",
 			"Content-Type":  "application/json",
@@ -2624,7 +2634,6 @@ func (s *accountInspectionScheduler) applyXAIDeepProbe(ctx context.Context, acco
 		return decision, firstStatus(probeStatus, quotaStatus), nil
 	}
 
-	status, message := classifyXAIDeepProbeResponse(resp)
 	errorDetail := inspectionHTTPErrorDetail(resp.Body)
 	switch status {
 	case accountInspectionDeepProbeSuccess:
@@ -2662,6 +2671,78 @@ func (s *accountInspectionScheduler) applyXAIDeepProbe(ctx context.Context, acco
 		s.appendLog("warning", fmt.Sprintf("%s xAI 深度检测临时异常：%s", account.identity(), message))
 		return decision, probeStatus, nil
 	}
+}
+
+func (s *accountInspectionScheduler) acquireXAIDeepProbe(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.xaiDeepProbeOnce.Do(func() {
+		s.xaiDeepProbeGate = make(chan struct{}, 1)
+	})
+	select {
+	case s.xaiDeepProbeGate <- struct{}{}:
+		return func() { <-s.xaiDeepProbeGate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func runXAIDeepProbeWithRetry(
+	ctx context.Context,
+	retries int,
+	retryDelay time.Duration,
+	task func() (accountInspectionHTTPResult, error),
+) (accountInspectionHTTPResult, accountInspectionDeepProbeStatus, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	attempts := retries + 1
+	if attempts < accountInspectionXAIMinAttempts {
+		attempts = accountInspectionXAIMinAttempts
+	}
+	if attempts > accountInspectionMaxRetries+1 {
+		attempts = accountInspectionMaxRetries + 1
+	}
+	var last accountInspectionHTTPResult
+	var lastStatus accountInspectionDeepProbeStatus
+	var lastMessage string
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		last, lastErr = task()
+		if lastErr == nil {
+			lastStatus, lastMessage = classifyXAIDeepProbeResponse(last)
+			if !shouldRetryXAIDeepProbe(lastStatus, lastMessage) {
+				return last, lastStatus, lastMessage, nil
+			}
+		}
+		if attempt+1 >= attempts {
+			break
+		}
+		if retryDelay <= 0 {
+			continue
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return last, lastStatus, lastMessage, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return last, lastStatus, lastMessage, lastErr
+}
+
+func shouldRetryXAIDeepProbe(status accountInspectionDeepProbeStatus, message string) bool {
+	if status != accountInspectionDeepProbeTransientError {
+		return false
+	}
+	return !strings.Contains(strings.ToLower(message), "content_filter")
 }
 
 func xaiResponsesURL(auth *coreauth.Auth) string {
