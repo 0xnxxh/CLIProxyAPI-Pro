@@ -356,14 +356,15 @@ def patch_modal_scroll_lock(target: Path) -> None:
     write(path, f'{text[:start]}{replacement}{text[end:]}')
 
 
-def patch_modal_scrollbar_gutter(target: Path) -> None:
+def patch_modal_content_scrollbar_layout(target: Path) -> None:
     path = target / 'src/styles/global.scss'
-    insert_once(
-        path,
-        'body {\n',
-        'html {\n  scrollbar-gutter: stable;\n}\n\nbody {\n',
-        'html {\n  scrollbar-gutter: stable;\n}',
-    )
+    text = read(path)
+    content_lock = "body.modal-open .content {\n  overflow: hidden;\n}\n\n"
+    if content_lock in text:
+        write(path, text.replace(content_lock, '', 1))
+        return
+    if 'body.modal-open .content' in text:
+        raise RuntimeError(f'Pattern not found in {path}: modal content scroll lock')
 
 
 def patch_routes(target: Path) -> None:
@@ -1591,7 +1592,7 @@ def main() -> None:
     copy_overlay(target)
     patch_modal_focus_restore(target)
     patch_modal_scroll_lock(target)
-    patch_modal_scrollbar_gutter(target)
+    patch_modal_content_scrollbar_layout(target)
     patch_routes(target)
     patch_layout(target)
     patch_icons(target)

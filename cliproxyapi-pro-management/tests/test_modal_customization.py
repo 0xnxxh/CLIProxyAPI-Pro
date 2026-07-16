@@ -50,6 +50,15 @@ export const FOCUSABLE_SELECTOR = 'button';
 
 GLOBAL_STYLE_SOURCE = """@use './layout.scss';
 
+html.modal-open,
+body.modal-open {
+  overflow: hidden;
+}
+
+body.modal-open .content {
+  overflow: hidden;
+}
+
 body {
   color: var(--text-primary);
 }
@@ -102,7 +111,7 @@ class ModalCustomizationTest(unittest.TestCase):
             CUSTOMIZATIONS.flush_writes()
             self.assertEqual(patched, scroll_lock_path.read_text())
 
-    def test_root_scrollbar_gutter_stays_reserved_while_modal_is_open(self) -> None:
+    def test_modal_keeps_the_content_scrollbar_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir)
             styles_dir = target / 'src/styles'
@@ -110,13 +119,14 @@ class ModalCustomizationTest(unittest.TestCase):
             global_style_path = styles_dir / 'global.scss'
             global_style_path.write_text(GLOBAL_STYLE_SOURCE)
 
-            CUSTOMIZATIONS.patch_modal_scrollbar_gutter(target)
+            CUSTOMIZATIONS.patch_modal_content_scrollbar_layout(target)
             CUSTOMIZATIONS.flush_writes()
 
             patched = global_style_path.read_text()
-            self.assertIn('html {\n  scrollbar-gutter: stable;\n}', patched)
+            self.assertIn('html.modal-open,\nbody.modal-open {\n  overflow: hidden;\n}', patched)
+            self.assertNotIn('body.modal-open .content', patched)
 
-            CUSTOMIZATIONS.patch_modal_scrollbar_gutter(target)
+            CUSTOMIZATIONS.patch_modal_content_scrollbar_layout(target)
             CUSTOMIZATIONS.flush_writes()
             self.assertEqual(patched, global_style_path.read_text())
 
