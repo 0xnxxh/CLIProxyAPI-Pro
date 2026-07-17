@@ -1068,7 +1068,13 @@ const formatTimestamp = (value: number, locale: string) => new Date(value).toLoc
 const formatInspectionInterval = (minutes: number, locale: string) =>
   new Intl.NumberFormat(locale, { style: 'unit', unit: 'minute', unitDisplay: 'short' }).format(minutes);
 
-const DONUT_COLORS = ['#2563eb', '#22c55e', '#f97316', '#8b5cf6', '#06b6d4', '#ec4899'];
+const buildHighAvailabilityBarStyle = (highAvailable: number, total: number): CSSProperties => {
+  const share = total > 0 ? Math.min(Math.max(highAvailable / total, 0), 1) : 0;
+  return {
+    '--bar-width': `${share * 100}%`,
+    '--bar-color': `hsl(${Math.round(share * 120)}, 72%, 44%)`,
+  } as CSSProperties;
+};
 
 const toSettingsDraft = (settings: AccountInspectionConfigurableSettings): InspectionSettingsDraft => ({
   targetType: settings.targetType,
@@ -2794,19 +2800,10 @@ export function AccountInspectionPage() {
                   <span>{authFileStatsReady ? `${authFileStats.total} ${t('monitoring.account_inspection_account_total')} · ${authFileStats.highAvailable} ${t('monitoring.account_inspection_high_available')}` : t('common.loading')}</span>
                 </div>
                 <span aria-hidden="true">
-                  <i
-                    style={{
-                      '--bar-width': authFileStatsReady && authFileStats.total > 0
-                        ? `${Math.min(Math.max((authFileStats.highAvailable / authFileStats.total) * 100, 0), 100)}%`
-                        : '0%',
-                      '--bar-color': DONUT_COLORS[0],
-                    } as CSSProperties}
-                  />
+                  <i style={buildHighAvailabilityBarStyle(authFileStats.highAvailable, authFileStats.total)} />
                 </span>
               </button>
-              {authFileStats.providers.length > 0 ? authFileStats.providers.map((provider, index) => {
-                const highAvailableShare = provider.total > 0 ? provider.highAvailable / provider.total : 0;
-                return (
+              {authFileStats.providers.length > 0 ? authFileStats.providers.map((provider) => (
                   <button
                     type="button"
                     key={provider.provider}
@@ -2827,11 +2824,10 @@ export function AccountInspectionPage() {
                       <span>{`${provider.total} ${t('monitoring.account_inspection_account_total')} · ${provider.highAvailable} ${t('monitoring.account_inspection_high_available')}`}</span>
                     </div>
                     <span aria-hidden="true">
-                      <i style={{ '--bar-width': `${Math.min(Math.max(highAvailableShare * 100, 0), 100)}%`, '--bar-color': DONUT_COLORS[index % DONUT_COLORS.length] } as CSSProperties} />
+                      <i style={buildHighAvailabilityBarStyle(provider.highAvailable, provider.total)} />
                     </span>
                   </button>
-                );
-              }) : <div className={styles.emptyBlockSmall}>{authFileStatsReady ? t('monitoring.account_inspection_empty') : t('common.loading')}</div>}
+              )) : <div className={styles.emptyBlockSmall}>{authFileStatsReady ? t('monitoring.account_inspection_empty') : t('common.loading')}</div>}
             </div>
           </Card>
         </div>

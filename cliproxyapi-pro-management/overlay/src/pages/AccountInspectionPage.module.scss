@@ -870,6 +870,7 @@
   height: 100%;
   border-radius: inherit;
   background: var(--bar-color, var(--inspect-accent));
+  transition: width 0.24s ease, background-color 0.24s ease;
 }
 
 .assetWorkbenchGrid,
