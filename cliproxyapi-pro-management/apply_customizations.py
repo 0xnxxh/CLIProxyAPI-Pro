@@ -163,6 +163,13 @@ AUTH_FILES_SEARCH_PLACEHOLDER_KEYS = {
     'zh-TW.json': '輸入名稱、類型、供應方、備註或套餐關鍵字，支援 * 萬用字元',
 }
 
+AUTH_FILES_PLAN_SORT_LABEL_KEYS = {
+    'en.json': 'Plan: High to Low',
+    'ru.json': 'Тариф: по убыванию',
+    'zh-CN.json': '套餐从高到低',
+    'zh-TW.json': '套餐由高到低',
+}
+
 CLAUDE_MODEL_ID_CLOAK_LOCALE_KEYS = {
     'en.json': {
         'title': 'Anthropic Client Compatibility',
@@ -1360,6 +1367,132 @@ def patch_auth_files_page_search(target: Path) -> None:
     )
 
 
+def patch_auth_files_page_plan_sort(target: Path) -> None:
+    page_path = target / 'src/pages/AuthFilesPage.tsx'
+    ui_state_path = target / 'src/features/authFiles/uiState.ts'
+
+    replace_once(
+        ui_state_path,
+        "export const AUTH_FILES_SORT_MODES = ['default', 'az', 'priority'] as const;\n",
+        "export const AUTH_FILES_SORT_MODES = ['default', 'az', 'priority', 'plan'] as const;\n",
+    )
+
+    insert_once(
+        page_path,
+        "import { useAuthStore, useNotificationStore, useThemeStore, useQuotaStore } from '@/stores';\n",
+        "import {\n"
+        "  compareAuthFilesByPlanDescending,\n"
+        "  isAuthFilePlanSortProvider,\n"
+        "} from '@/features/authFiles/planSort';\n"
+        "import { useAuthStore, useNotificationStore, useThemeStore, useQuotaStore } from '@/stores';\n",
+        "from '@/features/authFiles/planSort'",
+    )
+
+    insert_once(
+        page_path,
+        "  const enabledOnly = statusFilterMode === 'enabled';\n",
+        "  const enabledOnly = statusFilterMode === 'enabled';\n"
+        "  const planSortAvailable = isAuthFilePlanSortProvider(normalizedFilter);\n"
+        "  const effectiveSortMode: AuthFilesSortMode =\n"
+        "    sortMode === 'plan' && !planSortAvailable ? 'default' : sortMode;\n",
+        'effectiveSortMode',
+    )
+
+    insert_once(
+        page_path,
+        "  const handleStatusFilterModeChange = useCallback((nextMode: AuthFilesStatusFilterMode) => {\n",
+        "  useEffect(() => {\n"
+        "    if (sortMode !== 'plan' || planSortAvailable) return;\n"
+        "    setSortMode('default');\n"
+        "    setPage(1);\n"
+        "  }, [planSortAvailable, sortMode]);\n"
+        "\n"
+        "  const handleStatusFilterModeChange = useCallback((nextMode: AuthFilesStatusFilterMode) => {\n",
+        "if (sortMode !== 'plan' || planSortAvailable) return;",
+    )
+
+    replace_once(
+        page_path,
+        "  const sortOptions = useMemo(\n"
+        "    () => [\n"
+        "      { value: 'default', label: t('auth_files.sort_default') },\n"
+        "      { value: 'az', label: t('auth_files.sort_az') },\n"
+        "      { value: 'priority', label: t('auth_files.sort_priority') },\n"
+        "    ],\n"
+        "    [t]\n"
+        "  );\n",
+        "  const sortOptions = useMemo(() => {\n"
+        "    const options: Array<{ value: AuthFilesSortMode; label: string }> = [\n"
+        "      { value: 'default', label: t('auth_files.sort_default') },\n"
+        "      { value: 'az', label: t('auth_files.sort_az') },\n"
+        "      { value: 'priority', label: t('auth_files.sort_priority') },\n"
+        "    ];\n"
+        "    if (planSortAvailable) {\n"
+        "      options.push({ value: 'plan', label: t('auth_files.sort_plan_desc') });\n"
+        "    }\n"
+        "    return options;\n"
+        "  }, [planSortAvailable, t]);\n",
+    )
+
+    replace_once(
+        page_path,
+        "  const sorted = useMemo(() => {\n"
+        "    const copy = [...filtered];\n"
+        "    if (sortMode === 'default') {\n"
+        "      copy.sort((a, b) => {\n"
+        "        const providerA = normalizeProviderKey(String(a.provider ?? a.type ?? 'unknown'));\n"
+        "        const providerB = normalizeProviderKey(String(b.provider ?? b.type ?? 'unknown'));\n"
+        "        const providerCompare = providerA.localeCompare(providerB);\n"
+        "        if (providerCompare !== 0) return providerCompare;\n"
+        "        return a.name.localeCompare(b.name);\n"
+        "      });\n"
+        "    } else if (sortMode === 'az') {\n"
+        "      copy.sort((a, b) => a.name.localeCompare(b.name));\n"
+        "    } else if (sortMode === 'priority') {\n"
+        "      copy.sort((a, b) => {\n"
+        "        const pa = parsePriorityValue(a.priority) ?? 0;\n"
+        "        const pb = parsePriorityValue(b.priority) ?? 0;\n"
+        "        return pb - pa; // 高优先级排前面\n"
+        "      });\n"
+        "    }\n"
+        "    return copy;\n"
+        "  }, [filtered, sortMode]);\n",
+        "  const sorted = useMemo(() => {\n"
+        "    const copy = [...filtered];\n"
+        "    if (effectiveSortMode === 'default') {\n"
+        "      copy.sort((a, b) => {\n"
+        "        const providerA = normalizeProviderKey(String(a.provider ?? a.type ?? 'unknown'));\n"
+        "        const providerB = normalizeProviderKey(String(b.provider ?? b.type ?? 'unknown'));\n"
+        "        const providerCompare = providerA.localeCompare(providerB);\n"
+        "        if (providerCompare !== 0) return providerCompare;\n"
+        "        return a.name.localeCompare(b.name);\n"
+        "      });\n"
+        "    } else if (effectiveSortMode === 'az') {\n"
+        "      copy.sort((a, b) => a.name.localeCompare(b.name));\n"
+        "    } else if (effectiveSortMode === 'priority') {\n"
+        "      copy.sort((a, b) => {\n"
+        "        const pa = parsePriorityValue(a.priority) ?? 0;\n"
+        "        const pb = parsePriorityValue(b.priority) ?? 0;\n"
+        "        return pb - pa; // 高优先级排前面\n"
+        "      });\n"
+        "    } else if (effectiveSortMode === 'plan') {\n"
+        "      copy.sort((a, b) => compareAuthFilesByPlanDescending(a, b, quotaSearchStore));\n"
+        "    }\n"
+        "    return copy;\n"
+        "  }, [effectiveSortMode, filtered, quotaSearchStore]);\n",
+    )
+
+    replace_once(
+        page_path,
+        "                      value={sortMode}\n"
+        "                      options={sortOptions}\n"
+        "                      onChange={handleSortModeChange}\n",
+        "                      value={effectiveSortMode}\n"
+        "                      options={sortOptions}\n"
+        "                      onChange={handleSortModeChange}\n",
+    )
+
+
 def patch_runtime_detection(target: Path) -> None:
     version_path = target / 'src/services/api/version.ts'
     if "apiClient.get('/nodes')" not in read(version_path):
@@ -1780,6 +1913,10 @@ def patch_locales(target: Path) -> None:
             locale_path.name,
             AUTH_FILES_SEARCH_PLACEHOLDER_KEYS['en.json'],
         )
+        data.setdefault('auth_files', {})['sort_plan_desc'] = AUTH_FILES_PLAN_SORT_LABEL_KEYS.get(
+            locale_path.name,
+            AUTH_FILES_PLAN_SORT_LABEL_KEYS['en.json'],
+        )
         data.setdefault('gemini_cli_quota', {}).update(gemini_cli_locale['quota'])
         cloak_locale = CLAUDE_MODEL_ID_CLOAK_LOCALE_KEYS.get(
             locale_path.name,
@@ -1832,6 +1969,7 @@ def main() -> None:
     patch_quota_styles(target)
     patch_account_inspection_page(target)
     patch_auth_files_page_search(target)
+    patch_auth_files_page_plan_sort(target)
     patch_runtime_detection(target)
     patch_supporting_api_and_types(target)
     patch_claude_model_id_cloak_setting(target)
