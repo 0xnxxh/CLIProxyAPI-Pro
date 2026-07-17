@@ -53,9 +53,9 @@ def flush_writes() -> None:
         write_text(path, text)
 
 
-def replace_once(path: Path, old: str, new: str) -> None:
+def replace_once(path: Path, old: str, new: str, present=None) -> None:
     text = read(path)
-    if new and new in text:
+    if (present or new) and (present or new) in text:
         return
     if old not in text:
         raise SystemExit(f'pattern not found in {path}: {old[:120]!r}')
@@ -1881,6 +1881,16 @@ ensure_go_require(ROOT / 'go.mod', 'modernc.org/sqlite', 'v1.51.0')
 for embeddedusage_file in embeddedusage_target.rglob('*.go'):
     rewrite_module_imports(embeddedusage_file)
 
+auth_runtime_state = ROOT / 'sdk/cliproxy/auth/auth_runtime_state.go'
+write_text(
+    auth_runtime_state,
+    re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(patch_dir / 'auth_runtime_state.go')),
+)
+write_text(
+    ROOT / 'sdk/cliproxy/auth/auth_runtime_state_test.go',
+    re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(patch_dir / 'auth_runtime_state_test.go')),
+)
+
 redisqueue_plugin = ROOT / 'internal/redisqueue/plugin.go'
 redisqueue_usage_toggle = ROOT / 'internal/redisqueue/usage_toggle.go'
 write_text(redisqueue_plugin, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(patch_dir / 'redisqueue_plugin.go')))
@@ -2473,6 +2483,492 @@ func (m *Manager) refreshForInspection(ctx context.Context, id string, force boo
 }
 ''')
 
+auth_types = ROOT / 'sdk/cliproxy/auth/types.go'
+replace_once(
+    auth_types,
+    '''\tSuccess int64 `json:"-"`
+\tFailed  int64 `json:"-"`
+''',
+    '''\tSelected int64 `json:"-"`
+\tSuccess  int64 `json:"-"`
+\tFailed   int64 `json:"-"`
+''',
+    'Selected int64',
+)
+
+auth_conductor = ROOT / 'sdk/cliproxy/auth/conductor.go'
+replace_once(
+    auth_conductor,
+    '''\tauth.EnsureIndex()
+\tauthClone := auth.Clone()
+\tm.mu.Lock()
+\tm.auths[auth.ID] = authClone
+''',
+    '''\tauth.EnsureIndex()
+\trestoreAuthRuntimeStats(auth)
+\tauthClone := auth.Clone()
+\tm.mu.Lock()
+\tm.auths[auth.ID] = authClone
+''',
+    'restoreAuthRuntimeStats(auth)',
+)
+replace_once(
+    auth_conductor,
+    '''\tauth.Success = existing.Success
+\tauth.Failed = existing.Failed
+\tauth.recentRequests = existing.recentRequests
+''',
+    '''\tauth.Selected = existing.Selected
+\tauth.Success = existing.Success
+\tauth.Failed = existing.Failed
+\tauth.recentRequests = existing.recentRequests
+''',
+    'auth.Selected = existing.Selected',
+)
+replace_once(
+    auth_conductor,
+    '''\tm.mu.Unlock()
+\tif m.scheduler != nil && authSnapshot != nil {
+\t\tm.scheduler.upsertAuth(authSnapshot)
+\t}
+''',
+    '''\tm.mu.Unlock()
+\tqueueAuthRuntimeStats(authSnapshot)
+\tif m.scheduler != nil && authSnapshot != nil {
+\t\tm.scheduler.upsertAuth(authSnapshot)
+\t}
+''',
+    'queueAuthRuntimeStats(authSnapshot)',
+)
+replace_once(
+    auth_conductor,
+    '''\tif m.HomeEnabled() {
+\t\tauth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
+\t\treturn auth, exec, err
+\t}
+
+\tif m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+\t\treturn m.pickNextLegacy(ctx, provider, model, opts, tried)
+\t}
+''',
+    '''\tif m.HomeEnabled() {
+\t\tauth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
+\t\tif err == nil && auth != nil {
+\t\t\tm.recordAuthSelected(auth.ID)
+\t\t}
+\t\treturn auth, exec, err
+\t}
+
+\tif m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+\t\tauth, exec, err := m.pickNextLegacy(ctx, provider, model, opts, tried)
+\t\tif err == nil && auth != nil {
+\t\t\tm.recordAuthSelected(auth.ID)
+\t\t}
+\t\treturn auth, exec, err
+\t}
+''',
+    'm.recordAuthSelected(auth.ID)',
+)
+replace_once(
+    auth_conductor,
+    '''\t\treturn authCopy, executor, nil
+\t}
+}
+
+func (m *Manager) pickNextMixedLegacy''',
+    '''\t\tm.recordAuthSelected(authCopy.ID)
+\t\treturn authCopy, executor, nil
+\t}
+}
+
+func (m *Manager) pickNextMixedLegacy''',
+    'm.recordAuthSelected(authCopy.ID)\n\t\treturn authCopy, executor, nil',
+)
+replace_once(
+    auth_conductor,
+    '''\t\t\tif m.routeAwareSelectionRequired(candidate, model) {
+\t\t\t\tm.mu.RUnlock()
+\t\t\t\treturn m.pickNextLegacy(ctx, provider, model, opts, tried)
+\t\t\t}
+''',
+    '''\t\t\tif m.routeAwareSelectionRequired(candidate, model) {
+\t\t\t\tm.mu.RUnlock()
+\t\t\t\tauth, exec, err := m.pickNextLegacy(ctx, provider, model, opts, tried)
+\t\t\t\tif err == nil && auth != nil {
+\t\t\t\t\tm.recordAuthSelected(auth.ID)
+\t\t\t\t}
+\t\t\t\treturn auth, exec, err
+\t\t\t}
+''',
+    'm.mu.RUnlock()\n\t\t\t\tauth, exec, err := m.pickNextLegacy',
+)
+replace_once(
+    auth_conductor,
+    '''\tif m.HomeEnabled() {
+\t\treturn m.pickNextViaHome(ctx, model, opts, tried)
+\t}
+
+\tif m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+\t\treturn m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+\t}
+''',
+    '''\tif m.HomeEnabled() {
+\t\tauth, exec, providerKey, err := m.pickNextViaHome(ctx, model, opts, tried)
+\t\tif err == nil && auth != nil {
+\t\t\tm.recordAuthSelected(auth.ID)
+\t\t}
+\t\treturn auth, exec, providerKey, err
+\t}
+
+\tif m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+\t\tauth, exec, providerKey, err := m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+\t\tif err == nil && auth != nil {
+\t\t\tm.recordAuthSelected(auth.ID)
+\t\t}
+\t\treturn auth, exec, providerKey, err
+\t}
+''',
+    'auth, exec, providerKey, err := m.pickNextViaHome',
+)
+replace_once(
+    auth_conductor,
+    '''\t\treturn authCopy, executor, providerKey, nil
+\t}
+}
+
+type homeErrorEnvelope''',
+    '''\t\tm.recordAuthSelected(authCopy.ID)
+\t\treturn authCopy, executor, providerKey, nil
+\t}
+}
+
+type homeErrorEnvelope''',
+    'm.recordAuthSelected(authCopy.ID)\n\t\treturn authCopy, executor, providerKey, nil',
+)
+replace_once(
+    auth_conductor,
+    '''\t\t\tif m.routeAwareSelectionRequired(candidate, model) {
+\t\t\t\tm.mu.RUnlock()
+\t\t\t\treturn m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+\t\t\t}
+''',
+    '''\t\t\tif m.routeAwareSelectionRequired(candidate, model) {
+\t\t\t\tm.mu.RUnlock()
+\t\t\t\tauth, exec, providerKey, err := m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+\t\t\t\tif err == nil && auth != nil {
+\t\t\t\t\tm.recordAuthSelected(auth.ID)
+\t\t\t\t}
+\t\t\t\treturn auth, exec, providerKey, err
+\t\t\t}
+''',
+    'm.mu.RUnlock()\n\t\t\t\tauth, exec, providerKey, err := m.pickNextMixedLegacy',
+)
+
+auth_files_handler = ROOT / 'internal/api/handlers/management/auth_files.go'
+add_go_import(
+    auth_files_handler,
+    '"' + import_path('internal/config') + '"\n',
+    '\t"' + import_path('internal/embeddedusage') + '"\n',
+)
+replace_once(
+    auth_files_handler,
+    '''\tentry["success"] = auth.Success
+\tentry["failed"] = auth.Failed
+''',
+    '''\tentry["selected"] = auth.Selected
+\tentry["success"] = auth.Success
+\tentry["failed"] = auth.Failed
+''',
+    'entry["selected"] = auth.Selected',
+)
+replace_once(
+    auth_files_handler,
+    '''\t\t\t\tdeleted++
+\t\t\t\th.removeAuth(ctx, full)
+''',
+    '''\t\t\t\tdeleted++
+\t\t\t\th.removeAuth(ctx, full)
+\t\t\t\t_ = embeddedusage.DeleteAuthRuntimeState(ctx, "", "", name)
+''',
+    'DeleteAuthRuntimeState(ctx, "", "", name)',
+)
+replace_once(
+    auth_files_handler,
+    '''\ttargetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+\ttargetID := ""
+\tif targetAuth := h.findAuthForDelete(name); targetAuth != nil {
+''',
+    '''\ttargetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+\ttargetID := ""
+\ttargetIndex := ""
+\tif targetAuth := h.findAuthForDelete(name); targetAuth != nil {
+''',
+    'targetIndex := ""',
+)
+replace_once(
+    auth_files_handler,
+    '''\t\ttargetID = strings.TrimSpace(targetAuth.ID)
+\t\tif path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
+''',
+    '''\t\ttargetID = strings.TrimSpace(targetAuth.ID)
+\t\ttargetIndex = strings.TrimSpace(targetAuth.Index)
+\t\tif path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
+''',
+    'targetIndex = strings.TrimSpace(targetAuth.Index)',
+)
+replace_once(
+    auth_files_handler,
+    '''\th.removeAuthsForPath(ctx, targetPath, targetID)
+\treturn filepath.Base(name), http.StatusOK, nil
+''',
+    '''\th.removeAuthsForPath(ctx, targetPath, targetID)
+\t_ = embeddedusage.DeleteAuthRuntimeState(ctx, targetID, targetIndex, filepath.Base(name))
+\treturn filepath.Base(name), http.StatusOK, nil
+''',
+    'DeleteAuthRuntimeState(ctx, targetID, targetIndex',
+)
+
+auth_scheduler = ROOT / 'sdk/cliproxy/auth/scheduler.go'
+add_go_import(auth_scheduler, '"context"\n', '\t"fmt"\n')
+add_go_import(auth_scheduler, '"time"\n', '\t"' + import_path('internal/embeddedusage') + '"\n')
+replace_once(
+    auth_scheduler,
+    '''\tmixedCursors  map[string]int
+}''',
+    '''\tmixedCursors     map[string]int
+\tmixedRestored    map[string]bool
+\tpersistedCursors map[string]string
+}''',
+    'persistedCursors map[string]string',
+)
+replace_once(
+    auth_scheduler,
+    '''\tmodelShards map[string]*modelScheduler
+}''',
+    '''\tmodelShards      map[string]*modelScheduler
+\tpersistedCursors map[string]string
+}''',
+    'modelShards      map[string]*modelScheduler',
+)
+replace_once(
+    auth_scheduler,
+    '''type modelScheduler struct {
+\tmodelKey        string''',
+    '''type modelScheduler struct {
+\tproviderKey     string
+\tmodelKey        string
+\tpersistedCursors map[string]string''',
+    'providerKey     string\n\tmodelKey',
+)
+replace_once(
+    auth_scheduler,
+    '''type readyView struct {
+\tflat   []*scheduledAuth
+\tcursor int
+}''',
+    '''type readyView struct {
+\tflat       []*scheduledAuth
+\tcursor     int
+\tcursorKey  string
+\tlastAuthID string
+\tpersisted  map[string]string
+}''',
+    'cursorKey  string',
+)
+replace_once(
+    auth_scheduler,
+    '''func newAuthScheduler(selector Selector) *authScheduler {
+\treturn &authScheduler{
+\t\tstrategy:      selectorStrategy(selector),
+\t\tproviders:     make(map[string]*providerScheduler),
+\t\tauthProviders: make(map[string]string),
+\t\tmixedCursors:  make(map[string]int),
+\t}
+}''',
+    '''func newAuthScheduler(selector Selector) *authScheduler {
+\tpersistedCursors := make(map[string]string)
+\tif states, err := embeddedusage.ListRoutingCursorStates(context.Background()); err == nil {
+\t\tfor _, state := range states {
+\t\t\tpersistedCursors[state.CursorKey] = state.LastAuthID
+\t\t}
+\t}
+\treturn &authScheduler{
+\t\tstrategy:         selectorStrategy(selector),
+\t\tproviders:        make(map[string]*providerScheduler),
+\t\tauthProviders:    make(map[string]string),
+\t\tmixedCursors:     make(map[string]int),
+\t\tmixedRestored:    make(map[string]bool),
+\t\tpersistedCursors: persistedCursors,
+\t}
+}''',
+    'persistedCursors := make(map[string]string)',
+)
+replace_once(
+    auth_scheduler,
+    '''\ts.mixedCursors = make(map[string]int)
+\tnow := time.Now()''',
+    '''\ts.mixedCursors = make(map[string]int)
+\ts.mixedRestored = make(map[string]bool)
+\tnow := time.Now()''',
+    's.mixedRestored = make(map[string]bool)',
+)
+replace_once(
+    auth_scheduler,
+    '''\ts.strategy = selectorStrategy(selector)
+\tclear(s.mixedCursors)
+''',
+    '''\ts.strategy = selectorStrategy(selector)
+\tclear(s.mixedCursors)
+\tclear(s.mixedRestored)
+''',
+    'clear(s.mixedRestored)',
+)
+replace_once(
+    auth_scheduler,
+    '''\t\tproviderState = &providerScheduler{
+\t\t\tproviderKey: providerKey,
+\t\t\tauths:       make(map[string]*scheduledAuthMeta),
+\t\t\tmodelShards: make(map[string]*modelScheduler),
+\t\t}''',
+    '''\t\tproviderState = &providerScheduler{
+\t\t\tproviderKey:      providerKey,
+\t\t\tauths:            make(map[string]*scheduledAuthMeta),
+\t\t\tmodelShards:      make(map[string]*modelScheduler),
+\t\t\tpersistedCursors: s.persistedCursors,
+\t\t}''',
+    'persistedCursors: s.persistedCursors',
+)
+replace_once(
+    auth_scheduler,
+    '''\tshard := &modelScheduler{
+\t\tmodelKey:        modelKey,
+\t\tentries:         make(map[string]*scheduledAuth),
+\t\treadyByPriority: make(map[int]*readyBucket),
+\t}''',
+    '''\tshard := &modelScheduler{
+\t\tproviderKey:      p.providerKey,
+\t\tmodelKey:         modelKey,
+\t\tpersistedCursors: p.persistedCursors,
+\t\tentries:          make(map[string]*scheduledAuth),
+\t\treadyByPriority:  make(map[int]*readyBucket),
+\t}''',
+    'persistedCursors: p.persistedCursors',
+)
+replace_once(
+    auth_scheduler,
+    '''\t\tbucket := buildReadyBucket(entries)
+''',
+    '''\t\tcursorPrefix := fmt.Sprintf("single|%s|%s|%d", m.providerKey, m.modelKey, priority)
+\t\tbucket := buildReadyBucket(entries, cursorPrefix, m.persistedCursors)
+''',
+    'cursorPrefix := fmt.Sprintf("single|%s|%s|%d"',
+)
+replace_once(
+    auth_scheduler,
+    '''func buildReadyBucket(entries []*scheduledAuth) *readyBucket {
+\tbucket := &readyBucket{}
+\tbucket.all = buildReadyView(entries)''',
+    '''func buildReadyBucket(entries []*scheduledAuth, cursorPrefix string, persisted map[string]string) *readyBucket {
+\tbucket := &readyBucket{}
+\tbucket.all = buildReadyView(entries, cursorPrefix+"|all", persisted)''',
+    'func buildReadyBucket(entries []*scheduledAuth, cursorPrefix string',
+)
+replace_once(
+    auth_scheduler,
+    '''\tbucket.ws = buildReadyView(wsEntries)
+''',
+    '''\tbucket.ws = buildReadyView(wsEntries, cursorPrefix+"|ws", persisted)
+''',
+    'buildReadyView(wsEntries, cursorPrefix+"|ws"',
+)
+replace_once(
+    auth_scheduler,
+    '''func buildReadyView(entries []*scheduledAuth) readyView {
+\treturn readyView{flat: append([]*scheduledAuth(nil), entries...)}
+}''',
+    '''func buildReadyView(entries []*scheduledAuth, cursorKey string, persisted map[string]string) readyView {
+\tview := readyView{flat: append([]*scheduledAuth(nil), entries...), cursorKey: cursorKey, persisted: persisted}
+\tview.restoreAfterAuthID(persisted[cursorKey])
+\treturn view
+}
+
+func (v *readyView) restoreAfterAuthID(lastAuthID string) {
+\tlastAuthID = strings.TrimSpace(lastAuthID)
+\tif lastAuthID == "" || len(v.flat) == 0 {
+\t\treturn
+\t}
+\tv.lastAuthID = lastAuthID
+\tfor index, entry := range v.flat {
+\t\tif entry == nil || entry.auth == nil {
+\t\t\tcontinue
+\t\t}
+\t\tif entry.auth.ID == lastAuthID {
+\t\t\tv.cursor = index + 1
+\t\t\treturn
+\t\t}
+\t\tif entry.auth.ID > lastAuthID {
+\t\t\tv.cursor = index
+\t\t\treturn
+\t\t}
+\t}
+\tv.cursor = 0
+}''',
+    'func (v *readyView) restoreAfterAuthID',
+)
+replace_once(
+    auth_scheduler,
+    '''\t\tv.cursor = index + 1
+\t\treturn entry
+''',
+    '''\t\tv.cursor = index + 1
+\t\tv.lastAuthID = entry.auth.ID
+\t\tif v.persisted != nil {
+\t\t\tv.persisted[v.cursorKey] = entry.auth.ID
+\t\t}
+\t\tembeddedusage.QueueRoutingCursorState(embeddedusage.RoutingCursorState{
+\t\t\tCursorKey: v.cursorKey, LastAuthID: entry.auth.ID, UpdatedAtMS: time.Now().UnixMilli(),
+\t\t})
+\t\treturn entry
+''',
+    'v.persisted[v.cursorKey] = entry.auth.ID',
+)
+replace_once(
+    auth_scheduler,
+    '''\tstartSlot := s.mixedCursors[cursorKey] % totalWeight
+''',
+    '''\tstartSlot := s.mixedCursors[cursorKey] % totalWeight
+\tpersistedCursorKey := fmt.Sprintf("mixed|%s|%d", cursorKey, bestPriority)
+\tif !s.mixedRestored[cursorKey] {
+\t\ts.mixedRestored[cursorKey] = true
+\t\tif lastAuthID := s.persistedCursors[persistedCursorKey]; lastAuthID != "" {
+\t\t\tfor providerIndex, shard := range candidateShards {
+\t\t\t\tif shard != nil {
+\t\t\t\t\tif _, ok := shard.entries[lastAuthID]; ok && weights[providerIndex] > 0 {
+\t\t\t\t\t\tstartSlot = segmentStarts[providerIndex]
+\t\t\t\t\t\tbreak
+\t\t\t\t\t}
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t}
+''',
+    'persistedCursorKey := fmt.Sprintf("mixed|%s|%d"',
+)
+replace_once(
+    auth_scheduler,
+    '''\t\ts.mixedCursors[cursorKey] = slot + 1
+\t\treturn picked, providerKey, nil
+''',
+    '''\t\ts.mixedCursors[cursorKey] = slot + 1
+\t\ts.persistedCursors[persistedCursorKey] = picked.ID
+\t\tembeddedusage.QueueRoutingCursorState(embeddedusage.RoutingCursorState{
+\t\t\tCursorKey: persistedCursorKey, LastAuthID: picked.ID, UpdatedAtMS: time.Now().UnixMilli(),
+\t\t})
+\t\treturn picked, providerKey, nil
+''',
+    's.persistedCursors[persistedCursorKey] = picked.ID',
+)
+
 flush_writes()
 subprocess.run([
     'gofmt',
@@ -2480,6 +2976,7 @@ subprocess.run([
     'cmd/server/main.go',
     'internal/api/server.go',
     'internal/api/server_test.go',
+    'internal/api/handlers/management/auth_files.go',
     'internal/config/sdk_config.go',
     'internal/logging/requestid.go',
     'internal/logging/requestmeta.go',
@@ -2499,5 +2996,10 @@ subprocess.run([
     'internal/requestmeta/response.go',
     'sdk/api/handlers/claude/code_handlers.go',
     'sdk/api/handlers/claude/code_handlers_model_test.go',
+    'sdk/cliproxy/auth/auth_runtime_state.go',
+    'sdk/cliproxy/auth/auth_runtime_state_test.go',
+    'sdk/cliproxy/auth/conductor.go',
+    'sdk/cliproxy/auth/scheduler.go',
+    'sdk/cliproxy/auth/types.go',
 ], cwd=ROOT, check=True)
 subprocess.run(['go', 'mod', 'tidy'], cwd=ROOT, check=True)

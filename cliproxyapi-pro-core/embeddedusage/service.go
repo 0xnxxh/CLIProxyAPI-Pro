@@ -16,6 +16,7 @@ import (
 )
 
 type Service struct {
+	ctx    context.Context
 	cfg    Config
 	store  *Store
 	server *Server
@@ -37,6 +38,7 @@ func Start(ctx context.Context) (*Service, error) {
 	redisqueue.SetUsageStatisticsEnabled(true)
 
 	service := &Service{
+		ctx:   ctx,
 		cfg:   cfg,
 		store: store,
 	}
@@ -47,6 +49,7 @@ func Start(ctx context.Context) (*Service, error) {
 	go service.runModelPriceSync(ctx)
 	go func() {
 		<-ctx.Done()
+		stopRuntimeStateWriter(service)
 		if err := store.Close(); err != nil {
 			log.WithError(err).Warn("failed to close embedded usage store")
 		}

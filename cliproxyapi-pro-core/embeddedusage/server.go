@@ -689,6 +689,10 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 	modelPriceRecords := 0
 	var quotaEntries []QuotaCacheEntry
 	quotaCacheRecords := 0
+	var routingCursors []RoutingCursorState
+	routingCursorRecords := 0
+	var authRuntimeStats []AuthRuntimeStats
+	authRuntimeStatsRecords := 0
 	var accountInspectionSchedule json.RawMessage
 	accountInspectionScheduleRecords := 0
 	var accountInspectionSnapshot json.RawMessage
@@ -754,6 +758,24 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 			quotaEntries = append(quotaEntries, entries...)
 			quotaCacheRecords++
 			continue
+		case routingCursorExportRecordType:
+			items, err := parseRoutingCursorImportRecord(raw)
+			if err != nil {
+				failed++
+				continue
+			}
+			routingCursors = append(routingCursors, items...)
+			routingCursorRecords++
+			continue
+		case authRuntimeStatsExportRecordType:
+			items, err := parseAuthRuntimeStatsImportRecord(raw)
+			if err != nil {
+				failed++
+				continue
+			}
+			authRuntimeStats = append(authRuntimeStats, items...)
+			authRuntimeStatsRecords++
+			continue
 		}
 		event, err := internalusage.NormalizeRaw(raw)
 		if err != nil {
@@ -795,13 +817,20 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 			return
 		}
 	}
-	if len(quotaEntries) > 0 {
-		for _, entry := range quotaEntries {
-			if err := s.store.SetQuotaCache(c.Request.Context(), entry); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-		}
+	importedQuotaEntries, err := s.store.ImportQuotaCache(c.Request.Context(), quotaEntries)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	importedRoutingCursors, err := s.store.ImportRoutingCursorStates(c.Request.Context(), routingCursors)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	importedAuthRuntimeStats, err := s.store.ImportAuthRuntimeStats(c.Request.Context(), authRuntimeStats)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	if monitoringSettings != nil {
 		if err := s.store.SetMonitoringSettings(c.Request.Context(), *monitoringSettings); err != nil {
@@ -829,8 +858,12 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 		"modelPrices":                      len(modelPrices),
 		"modelPriceRecords":                modelPriceRecords,
 		"modelPriceRules":                  len(modelPriceRules),
-		"quotaCache":                       len(quotaEntries),
+		"quotaCache":                       importedQuotaEntries,
 		"quotaCacheRecords":                quotaCacheRecords,
+		"routingCursors":                   importedRoutingCursors,
+		"routingCursorRecords":             routingCursorRecords,
+		"authRuntimeStats":                 importedAuthRuntimeStats,
+		"authRuntimeStatsRecords":          authRuntimeStatsRecords,
 		"accountInspectionSchedule":        accountInspectionSchedule != nil,
 		"accountInspectionScheduleRecords": accountInspectionScheduleRecords,
 		"accountInspectionSnapshot":        accountInspectionSnapshot != nil,
@@ -897,7 +930,52 @@ func parseQuotaCacheImportRecord(raw []byte) ([]QuotaCacheEntry, error) {
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, err
 	}
+	if record.Version < 1 || record.Version > 2 {
+		return nil, fmt.Errorf("unsupported quota cache export version %d", record.Version)
+	}
+	for index := range record.Entries {
+		entry := &record.Entries[index]
+		if entry.Provider == "" || entry.FileName == "" || len(entry.Data) == 0 || !json.Valid(entry.Data) {
+			return nil, fmt.Errorf("invalid quota cache entry at index %d", index)
+		}
+		if record.Version == 1 && entry.ObservedAt <= 0 {
+			entry.ObservedAt = entry.CachedAt
+		}
+	}
 	return record.Entries, nil
+}
+
+func parseRoutingCursorImportRecord(raw []byte) ([]RoutingCursorState, error) {
+	var record routingCursorExportRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, err
+	}
+	if record.Version != 1 {
+		return nil, fmt.Errorf("unsupported routing cursor export version %d", record.Version)
+	}
+	for index, item := range record.Items {
+		if strings.TrimSpace(item.CursorKey) == "" || strings.TrimSpace(item.LastAuthID) == "" {
+			return nil, fmt.Errorf("invalid routing cursor at index %d", index)
+		}
+	}
+	return record.Items, nil
+}
+
+func parseAuthRuntimeStatsImportRecord(raw []byte) ([]AuthRuntimeStats, error) {
+	var record authRuntimeStatsExportRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, err
+	}
+	if record.Version != 1 {
+		return nil, fmt.Errorf("unsupported auth runtime stats export version %d", record.Version)
+	}
+	for index, item := range record.Items {
+		if strings.TrimSpace(item.AuthIndex) == "" || strings.TrimSpace(item.AuthID) == "" ||
+			item.SelectedCount < 0 || item.SuccessCount < 0 || item.FailureCount < 0 || len(item.RecentBuckets) > 20 {
+			return nil, fmt.Errorf("invalid auth runtime stats at index %d", index)
+		}
+	}
+	return record.Items, nil
 }
 
 func parseMonitoringSettingsImportRecord(raw []byte) (MonitoringSettings, error) {

@@ -72,6 +72,7 @@ import { type QuotaRenderHelpers, type QuotaStatusState } from '@/components/quo
 import { QuotaProgressBar as AuthFileQuotaProgressBar } from '@/features/authFiles/components/QuotaProgressBar';
 import authFileQuotaStyles from '@/pages/AuthFilesPage.module.scss';
 import quotaStyles from '@/pages/QuotaPage.module.scss';
+import { quotaPersistenceMiddleware } from '@/extensions/quota/persistenceMiddleware';
 import styles from './MonitoringCenterPage.module.scss';
 
 const TIME_RANGE_OPTIONS: Array<{ value: MonitoringTimeRange; labelKey: string }> = [
@@ -892,6 +893,10 @@ type UsageImportResult = {
 	modelPriceRules?: number;
   quotaCache?: number;
   quotaCacheRecords?: number;
+  routingCursors?: number;
+  routingCursorRecords?: number;
+  authRuntimeStats?: number;
+  authRuntimeStatsRecords?: number;
   accountInspectionSchedule?: boolean;
   accountInspectionScheduleRecords?: number;
   accountInspectionSnapshot?: boolean;
@@ -4167,6 +4172,8 @@ export function MonitoringCenterPage() {
         const importedExtras = [
 		  (result.modelPriceRecords ?? 0) > 0 ? t('usage_stats.import_model_prices_restored', { count: Math.max(result.modelPrices ?? 0, result.modelPriceRules ?? 0) }) : '',
           (result.quotaCacheRecords ?? 0) > 0 ? t('usage_stats.import_quota_cache_restored', { count: result.quotaCache ?? 0 }) : '',
+          (result.routingCursorRecords ?? 0) > 0 ? t('usage_stats.import_routing_cursors_restored', { count: result.routingCursors ?? 0 }) : '',
+          (result.authRuntimeStatsRecords ?? 0) > 0 ? t('usage_stats.import_auth_runtime_stats_restored', { count: result.authRuntimeStats ?? 0 }) : '',
           result.accountInspectionSchedule ? t('usage_stats.import_account_inspection_schedule_restored') : '',
           result.accountInspectionSnapshot ? t('usage_stats.import_account_inspection_snapshot_restored') : '',
           result.monitoringSettings ? t('usage_stats.import_monitoring_settings_restored') : '',
@@ -4183,6 +4190,8 @@ export function MonitoringCenterPage() {
           ].filter(Boolean).join(' · '),
           (result.failed ?? 0) > 0 ? 'warning' : 'success'
         );
+        quotaPersistenceMiddleware.markStale();
+        await quotaPersistenceMiddleware.ensureFresh();
         await refreshAll();
       } catch (error) {
         showNotification(error instanceof Error ? error.message : String(error || t('common.unknown_error')), 'error');

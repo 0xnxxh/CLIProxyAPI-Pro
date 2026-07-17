@@ -113,18 +113,49 @@ type cachedUsageSummary struct {
 }
 
 type QuotaCacheEntry struct {
-	ID         string          `json:"id"`
-	Provider   string          `json:"provider"`
-	FileName   string          `json:"fileName"`
-	Data       json.RawMessage `json:"data"`
-	CachedAt   int64           `json:"cachedAt"`
-	AccessedAt int64           `json:"accessedAt"`
-	Version    int             `json:"version"`
+	ID                  string          `json:"id"`
+	Provider            string          `json:"provider"`
+	FileName            string          `json:"fileName"`
+	AuthIndex           string          `json:"authIndex,omitempty"`
+	IdentityFingerprint string          `json:"identityFingerprint,omitempty"`
+	Data                json.RawMessage `json:"data"`
+	CachedAt            int64           `json:"cachedAt"`
+	AccessedAt          int64           `json:"accessedAt"`
+	ObservedAt          int64           `json:"observedAt"`
+	StoredAt            int64           `json:"storedAt"`
+	Version             int             `json:"version"`
+	Revision            int64           `json:"revision"`
 }
 
 type QuotaCacheStats struct {
 	TotalEntries int64 `json:"totalEntries"`
 	UpdatedAt    int64 `json:"updatedAt"`
+	Generation   int64 `json:"generation"`
+}
+
+type RoutingCursorState struct {
+	CursorKey   string `json:"cursorKey"`
+	LastAuthID  string `json:"lastAuthId"`
+	UpdatedAtMS int64  `json:"updatedAtMs"`
+}
+
+type RuntimeRequestBucket struct {
+	BucketID int64 `json:"bucketId"`
+	Success  int64 `json:"success"`
+	Failed   int64 `json:"failed"`
+}
+
+type AuthRuntimeStats struct {
+	AuthIndex           string                 `json:"authIndex"`
+	AuthID              string                 `json:"authId"`
+	FileName            string                 `json:"fileName,omitempty"`
+	IdentityFingerprint string                 `json:"identityFingerprint,omitempty"`
+	SelectedCount       int64                  `json:"selectedCount"`
+	SuccessCount        int64                  `json:"successCount"`
+	FailureCount        int64                  `json:"failureCount"`
+	RecentBuckets       []RuntimeRequestBucket `json:"recentBuckets"`
+	Generation          int64                  `json:"generation"`
+	UpdatedAtMS         int64                  `json:"updatedAtMs"`
 }
 
 type MonitoringSettings struct {
@@ -175,9 +206,25 @@ type quotaCacheExportRecord struct {
 	ExportedAt int64             `json:"exported_at_ms"`
 }
 
+type routingCursorExportRecord struct {
+	RecordType string               `json:"record_type"`
+	Version    int                  `json:"version"`
+	Items      []RoutingCursorState `json:"items"`
+	ExportedAt int64                `json:"exported_at_ms"`
+}
+
+type authRuntimeStatsExportRecord struct {
+	RecordType string             `json:"record_type"`
+	Version    int                `json:"version"`
+	Items      []AuthRuntimeStats `json:"items"`
+	ExportedAt int64              `json:"exported_at_ms"`
+}
+
 const modelPricesExportRecordType = "model_prices"
 const quotaCacheExportRecordType = "quota_cache"
 const monitoringSettingsExportRecordType = "monitoring_settings"
+const routingCursorExportRecordType = "routing_cursor_state"
+const authRuntimeStatsExportRecordType = "auth_runtime_stats"
 
 type Store struct {
 	db           *sql.DB
@@ -318,6 +365,29 @@ func (s *Store) init() error {
 			accessed_at_ms integer not null,
 			version integer not null default 1
 		)`,
+		`create table if not exists runtime_state_meta (
+			state_key text primary key,
+			generation integer not null default 1,
+			updated_at_ms integer not null default 0
+		)`,
+		`create table if not exists routing_cursor_state (
+			cursor_key text primary key,
+			last_auth_id text not null,
+			updated_at_ms integer not null
+		)`,
+		`create table if not exists auth_runtime_stats (
+			auth_index text primary key,
+			auth_id text not null,
+			file_name text not null default '',
+			identity_fingerprint text not null default '',
+			selected_count integer not null default 0,
+			success_count integer not null default 0,
+			failure_count integer not null default 0,
+			recent_buckets_json text not null default '[]',
+			generation integer not null default 1,
+			updated_at_ms integer not null
+		)`,
+		`create index if not exists idx_auth_runtime_stats_auth_id on auth_runtime_stats(auth_id)`,
 		`create index if not exists idx_quota_cache_provider on quota_cache(provider)`,
 		`create index if not exists idx_quota_cache_accessed_at on quota_cache(accessed_at_ms)`,
 		`create table if not exists model_prices (
@@ -386,10 +456,20 @@ func (s *Store) init() error {
 		`alter table usage_events add column cost_breakdown_json text`,
 		`alter table usage_summary add column generation integer not null default 1`,
 		`alter table usage_summary add column reset_at_ms integer not null default 0`,
+		`alter table quota_cache add column auth_index text not null default ''`,
+		`alter table quota_cache add column identity_fingerprint text not null default ''`,
+		`alter table quota_cache add column observed_at_ms integer not null default 0`,
+		`alter table quota_cache add column stored_at_ms integer not null default 0`,
+		`alter table quota_cache add column revision integer not null default 0`,
+		`alter table auth_runtime_stats add column file_name text not null default ''`,
 	} {
 		if _, err := s.db.Exec(statement); err != nil && !isDuplicateColumnError(err) {
 			return err
 		}
+	}
+	if _, err := s.db.Exec(`insert or ignore into runtime_state_meta(state_key, generation, updated_at_ms) values
+		('quota_cache', 1, 0), ('auth_runtime_stats', 1, 0), ('routing_cursor_state', 1, 0)`); err != nil {
+		return err
 	}
 	if err := s.migrateLegacyModelPrices(context.Background()); err != nil {
 		return err
@@ -1221,6 +1301,14 @@ func (s *Store) ExportJSONL(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	routingCursors, err := s.ListRoutingCursorStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	authRuntimeStats, err := s.ListAuthRuntimeStats(ctx)
+	if err != nil {
+		return nil, err
+	}
 	settings, err := s.GetMonitoringSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -1255,8 +1343,34 @@ func (s *Store) ExportJSONL(ctx context.Context) ([]byte, error) {
 	if len(quotaEntries) > 0 {
 		line, err := json.Marshal(quotaCacheExportRecord{
 			RecordType: quotaCacheExportRecordType,
-			Version:    1,
+			Version:    2,
 			Entries:    quotaEntries,
+			ExportedAt: time.Now().UnixMilli(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		output = append(output, line...)
+		output = append(output, '\n')
+	}
+	if len(routingCursors) > 0 {
+		line, err := json.Marshal(routingCursorExportRecord{
+			RecordType: routingCursorExportRecordType,
+			Version:    1,
+			Items:      routingCursors,
+			ExportedAt: time.Now().UnixMilli(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		output = append(output, line...)
+		output = append(output, '\n')
+	}
+	if len(authRuntimeStats) > 0 {
+		line, err := json.Marshal(authRuntimeStatsExportRecord{
+			RecordType: authRuntimeStatsExportRecordType,
+			Version:    1,
+			Items:      authRuntimeStats,
 			ExportedAt: time.Now().UnixMilli(),
 		})
 		if err != nil {
@@ -1459,7 +1573,8 @@ func (s *Store) ApplyRetention(ctx context.Context, now time.Time) (int64, error
 }
 
 func (s *Store) GetQuotaCache(ctx context.Context, provider string, fileName string) ([]QuotaCacheEntry, error) {
-	query := `select id, provider, file_name, data_json, cached_at_ms, accessed_at_ms, version from quota_cache`
+	query := `select id, provider, file_name, auth_index, identity_fingerprint, data_json,
+		cached_at_ms, accessed_at_ms, observed_at_ms, stored_at_ms, version, revision from quota_cache`
 	args := []any{}
 	switch {
 	case provider != "" && fileName != "":
@@ -1484,7 +1599,8 @@ func (s *Store) GetQuotaCache(ctx context.Context, provider string, fileName str
 	for rows.Next() {
 		var entry QuotaCacheEntry
 		var raw string
-		if err := rows.Scan(&entry.ID, &entry.Provider, &entry.FileName, &raw, &entry.CachedAt, &entry.AccessedAt, &entry.Version); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.Provider, &entry.FileName, &entry.AuthIndex, &entry.IdentityFingerprint,
+			&raw, &entry.CachedAt, &entry.AccessedAt, &entry.ObservedAt, &entry.StoredAt, &entry.Version, &entry.Revision); err != nil {
 			return nil, err
 		}
 		entry.Data = json.RawMessage(raw)
@@ -1516,7 +1632,7 @@ func (s *Store) touchQuotaCache(ctx context.Context, provider string, fileName s
 }
 
 func (s *Store) SetQuotaCache(ctx context.Context, entry QuotaCacheEntry) error {
-	if entry.Provider == "" || entry.FileName == "" || len(entry.Data) == 0 {
+	if entry.Provider == "" || entry.FileName == "" || len(entry.Data) == 0 || !json.Valid(entry.Data) {
 		return sql.ErrNoRows
 	}
 	if entry.ID == "" {
@@ -1525,6 +1641,12 @@ func (s *Store) SetQuotaCache(ctx context.Context, entry QuotaCacheEntry) error 
 	now := time.Now().UnixMilli()
 	if entry.CachedAt <= 0 {
 		entry.CachedAt = now
+	}
+	if entry.ObservedAt <= 0 || entry.ObservedAt > now+5*60*1000 {
+		entry.ObservedAt = entry.CachedAt
+	}
+	if entry.ObservedAt > now+5*60*1000 {
+		entry.ObservedAt = now
 	}
 	if entry.AccessedAt <= 0 {
 		entry.AccessedAt = now
@@ -1536,17 +1658,121 @@ func (s *Store) SetQuotaCache(ctx context.Context, entry QuotaCacheEntry) error 
 	defer s.quotaCacheMu.Unlock()
 
 	return retrySQLiteBusy(ctx, func() error {
-		_, err := s.db.ExecContext(ctx, `insert into quota_cache(id, provider, file_name, data_json, cached_at_ms, accessed_at_ms, version)
-			values(?, ?, ?, ?, ?, ?, ?)
-			on conflict(id) do update set
-				provider = excluded.provider,
-				file_name = excluded.file_name,
-				data_json = excluded.data_json,
-				cached_at_ms = excluded.cached_at_ms,
-				accessed_at_ms = excluded.accessed_at_ms,
-				version = excluded.version`, entry.ID, entry.Provider, entry.FileName, string(entry.Data), entry.CachedAt, entry.AccessedAt, entry.Version)
-		return err
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		changed, err := upsertQuotaCacheTx(ctx, tx, entry, false, now)
+		if err != nil {
+			return err
+		}
+		if changed {
+			if err := bumpRuntimeGenerationTx(ctx, tx, "quota_cache", now); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
 	})
+}
+
+func upsertQuotaCacheTx(ctx context.Context, tx *sql.Tx, entry QuotaCacheEntry, preserveRevision bool, now int64) (bool, error) {
+	var currentObserved, currentRevision int64
+	err := tx.QueryRowContext(ctx, `select observed_at_ms, revision from quota_cache where id = ?`, entry.ID).Scan(&currentObserved, &currentRevision)
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	if err == nil {
+		if preserveRevision {
+			if entry.Revision > 0 && entry.Revision <= currentRevision {
+				return false, nil
+			}
+			if entry.Revision <= 0 && entry.ObservedAt <= currentObserved {
+				return false, nil
+			}
+		} else if entry.ObservedAt < currentObserved {
+			return false, nil
+		}
+	}
+	if entry.Revision <= currentRevision || !preserveRevision {
+		entry.Revision = currentRevision + 1
+	}
+	entry.StoredAt = now
+	_, err = tx.ExecContext(ctx, `insert into quota_cache(
+		id, provider, file_name, auth_index, identity_fingerprint, data_json, cached_at_ms, accessed_at_ms,
+		observed_at_ms, stored_at_ms, version, revision)
+		values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		on conflict(id) do update set
+			provider = excluded.provider,
+			file_name = excluded.file_name,
+			auth_index = excluded.auth_index,
+			identity_fingerprint = excluded.identity_fingerprint,
+			data_json = excluded.data_json,
+			cached_at_ms = excluded.cached_at_ms,
+			accessed_at_ms = excluded.accessed_at_ms,
+			observed_at_ms = excluded.observed_at_ms,
+			stored_at_ms = excluded.stored_at_ms,
+			version = excluded.version,
+			revision = excluded.revision`, entry.ID, entry.Provider, entry.FileName, entry.AuthIndex,
+		entry.IdentityFingerprint, string(entry.Data), entry.CachedAt, entry.AccessedAt, entry.ObservedAt,
+		entry.StoredAt, entry.Version, entry.Revision)
+	return err == nil, err
+}
+
+func bumpRuntimeGenerationTx(ctx context.Context, tx *sql.Tx, stateKey string, now int64) error {
+	_, err := tx.ExecContext(ctx, `insert into runtime_state_meta(state_key, generation, updated_at_ms) values(?, 2, ?)
+		on conflict(state_key) do update set generation = runtime_state_meta.generation + 1, updated_at_ms = excluded.updated_at_ms`, stateKey, now)
+	return err
+}
+
+func (s *Store) ImportQuotaCache(ctx context.Context, entries []QuotaCacheEntry) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	s.quotaCacheMu.Lock()
+	defer s.quotaCacheMu.Unlock()
+	imported := 0
+	err := retrySQLiteBusy(ctx, func() error {
+		attemptImported := 0
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		now := time.Now().UnixMilli()
+		for _, entry := range entries {
+			if entry.Provider == "" || entry.FileName == "" || len(entry.Data) == 0 || !json.Valid(entry.Data) {
+				continue
+			}
+			if entry.ID == "" {
+				entry.ID = entry.Provider + ":" + entry.FileName
+			}
+			if entry.Version <= 0 {
+				entry.Version = 1
+			}
+			if entry.ObservedAt <= 0 {
+				entry.ObservedAt = entry.CachedAt
+			}
+			changed, err := upsertQuotaCacheTx(ctx, tx, entry, true, now)
+			if err != nil {
+				return err
+			}
+			if changed {
+				attemptImported++
+			}
+		}
+		if attemptImported > 0 {
+			if err := bumpRuntimeGenerationTx(ctx, tx, "quota_cache", now); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		imported = attemptImported
+		return nil
+	})
+	return imported, err
 }
 
 func retrySQLiteBusy(ctx context.Context, operation func() error) error {
@@ -1574,26 +1800,295 @@ func isSQLiteBusy(err error) bool {
 }
 
 func (s *Store) DeleteQuotaCache(ctx context.Context, provider string, fileName string) error {
-	switch {
-	case provider == "" && fileName == "":
-		_, err := s.db.ExecContext(ctx, `delete from quota_cache`)
-		return err
-	case provider != "" && fileName != "":
-		_, err := s.db.ExecContext(ctx, `delete from quota_cache where provider = ? and file_name = ?`, provider, fileName)
-		return err
-	case provider != "":
-		_, err := s.db.ExecContext(ctx, `delete from quota_cache where provider = ?`, provider)
-		return err
-	default:
-		_, err := s.db.ExecContext(ctx, `delete from quota_cache where file_name = ?`, fileName)
+	s.quotaCacheMu.Lock()
+	defer s.quotaCacheMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
+	defer func() { _ = tx.Rollback() }()
+	var result sql.Result
+	switch {
+	case provider == "" && fileName == "":
+		result, err = tx.ExecContext(ctx, `delete from quota_cache`)
+	case provider != "" && fileName != "":
+		result, err = tx.ExecContext(ctx, `delete from quota_cache where provider = ? and file_name = ?`, provider, fileName)
+	case provider != "":
+		result, err = tx.ExecContext(ctx, `delete from quota_cache where provider = ?`, provider)
+	default:
+		result, err = tx.ExecContext(ctx, `delete from quota_cache where file_name = ?`, fileName)
+	}
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		if err := bumpRuntimeGenerationTx(ctx, tx, "quota_cache", time.Now().UnixMilli()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) QuotaCacheStats(ctx context.Context) (QuotaCacheStats, error) {
 	var stats QuotaCacheStats
-	err := s.db.QueryRowContext(ctx, `select count(*), coalesce(max(cached_at_ms), 0) from quota_cache`).Scan(&stats.TotalEntries, &stats.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `select count(*), coalesce(max(stored_at_ms), 0),
+		coalesce((select generation from runtime_state_meta where state_key = 'quota_cache'), 1) from quota_cache`).Scan(&stats.TotalEntries, &stats.UpdatedAt, &stats.Generation)
 	return stats, err
+}
+
+func (s *Store) GetRoutingCursorState(ctx context.Context, cursorKey string) (RoutingCursorState, bool, error) {
+	var state RoutingCursorState
+	err := s.db.QueryRowContext(ctx, `select cursor_key, last_auth_id, updated_at_ms from routing_cursor_state where cursor_key = ?`, cursorKey).
+		Scan(&state.CursorKey, &state.LastAuthID, &state.UpdatedAtMS)
+	if err == sql.ErrNoRows {
+		return RoutingCursorState{}, false, nil
+	}
+	return state, err == nil, err
+}
+
+func (s *Store) ListRoutingCursorStates(ctx context.Context) ([]RoutingCursorState, error) {
+	rows, err := s.db.QueryContext(ctx, `select cursor_key, last_auth_id, updated_at_ms from routing_cursor_state order by cursor_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]RoutingCursorState, 0)
+	for rows.Next() {
+		var item RoutingCursorState
+		if err := rows.Scan(&item.CursorKey, &item.LastAuthID, &item.UpdatedAtMS); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) SetRoutingCursorState(ctx context.Context, state RoutingCursorState) error {
+	state.CursorKey = strings.TrimSpace(state.CursorKey)
+	state.LastAuthID = strings.TrimSpace(state.LastAuthID)
+	if state.CursorKey == "" || state.LastAuthID == "" {
+		return sql.ErrNoRows
+	}
+	if state.UpdatedAtMS <= 0 {
+		state.UpdatedAtMS = time.Now().UnixMilli()
+	}
+	_, err := s.db.ExecContext(ctx, `insert into routing_cursor_state(cursor_key, last_auth_id, updated_at_ms) values(?, ?, ?)
+		on conflict(cursor_key) do update set last_auth_id = excluded.last_auth_id, updated_at_ms = excluded.updated_at_ms
+		where excluded.updated_at_ms >= routing_cursor_state.updated_at_ms`, state.CursorKey, state.LastAuthID, state.UpdatedAtMS)
+	return err
+}
+
+func (s *Store) ImportRoutingCursorStates(ctx context.Context, items []RoutingCursorState) (int, error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	imported := 0
+	for _, item := range items {
+		item.CursorKey = strings.TrimSpace(item.CursorKey)
+		item.LastAuthID = strings.TrimSpace(item.LastAuthID)
+		if item.CursorKey == "" || item.LastAuthID == "" {
+			continue
+		}
+		if item.UpdatedAtMS <= 0 {
+			item.UpdatedAtMS = time.Now().UnixMilli()
+		}
+		result, err := tx.ExecContext(ctx, `insert into routing_cursor_state(cursor_key, last_auth_id, updated_at_ms) values(?, ?, ?)
+			on conflict(cursor_key) do update set last_auth_id = excluded.last_auth_id, updated_at_ms = excluded.updated_at_ms
+			where excluded.updated_at_ms >= routing_cursor_state.updated_at_ms`, item.CursorKey, item.LastAuthID, item.UpdatedAtMS)
+		if err != nil {
+			return 0, err
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			imported++
+		}
+	}
+	if imported > 0 {
+		if err := bumpRuntimeGenerationTx(ctx, tx, "routing_cursor_state", time.Now().UnixMilli()); err != nil {
+			return 0, err
+		}
+	}
+	return imported, tx.Commit()
+}
+
+func (s *Store) GetAuthRuntimeStats(ctx context.Context, authIndex, authID string) (AuthRuntimeStats, bool, error) {
+	query := `select auth_index, auth_id, file_name, identity_fingerprint, selected_count, success_count, failure_count,
+		recent_buckets_json, generation, updated_at_ms from auth_runtime_stats where auth_index = ?`
+	arg := strings.TrimSpace(authIndex)
+	if arg == "" {
+		query = strings.Replace(query, "auth_index = ?", "auth_id = ?", 1)
+		arg = strings.TrimSpace(authID)
+	}
+	var item AuthRuntimeStats
+	var buckets string
+	err := s.db.QueryRowContext(ctx, query, arg).Scan(&item.AuthIndex, &item.AuthID, &item.FileName, &item.IdentityFingerprint,
+		&item.SelectedCount, &item.SuccessCount, &item.FailureCount, &buckets, &item.Generation, &item.UpdatedAtMS)
+	if err == sql.ErrNoRows {
+		return AuthRuntimeStats{}, false, nil
+	}
+	if err != nil {
+		return AuthRuntimeStats{}, false, err
+	}
+	if err := json.Unmarshal([]byte(buckets), &item.RecentBuckets); err != nil {
+		return AuthRuntimeStats{}, false, err
+	}
+	return item, true, nil
+}
+
+func (s *Store) ListAuthRuntimeStats(ctx context.Context) ([]AuthRuntimeStats, error) {
+	rows, err := s.db.QueryContext(ctx, `select auth_index, auth_id, file_name, identity_fingerprint, selected_count, success_count,
+		failure_count, recent_buckets_json, generation, updated_at_ms from auth_runtime_stats order by auth_index`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AuthRuntimeStats, 0)
+	for rows.Next() {
+		var item AuthRuntimeStats
+		var buckets string
+		if err := rows.Scan(&item.AuthIndex, &item.AuthID, &item.FileName, &item.IdentityFingerprint, &item.SelectedCount,
+			&item.SuccessCount, &item.FailureCount, &buckets, &item.Generation, &item.UpdatedAtMS); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(buckets), &item.RecentBuckets); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func normalizeRuntimeBuckets(items []RuntimeRequestBucket) []RuntimeRequestBucket {
+	if len(items) > 20 {
+		items = items[len(items)-20:]
+	}
+	out := make([]RuntimeRequestBucket, 0, len(items))
+	for _, item := range items {
+		if item.BucketID <= 0 || item.Success < 0 || item.Failed < 0 {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func setAuthRuntimeStatsTx(ctx context.Context, tx *sql.Tx, item AuthRuntimeStats) (bool, error) {
+	item.AuthIndex = strings.TrimSpace(item.AuthIndex)
+	item.AuthID = strings.TrimSpace(item.AuthID)
+	if item.AuthIndex == "" || item.AuthID == "" || item.SelectedCount < 0 || item.SuccessCount < 0 || item.FailureCount < 0 {
+		return false, nil
+	}
+	item.RecentBuckets = normalizeRuntimeBuckets(item.RecentBuckets)
+	buckets, err := json.Marshal(item.RecentBuckets)
+	if err != nil {
+		return false, err
+	}
+	if item.Generation <= 0 {
+		item.Generation = 1
+	}
+	if item.UpdatedAtMS <= 0 {
+		item.UpdatedAtMS = time.Now().UnixMilli()
+	}
+	result, err := tx.ExecContext(ctx, `insert into auth_runtime_stats(auth_index, auth_id, file_name, identity_fingerprint,
+		selected_count, success_count, failure_count, recent_buckets_json, generation, updated_at_ms)
+		values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		on conflict(auth_index) do update set
+			auth_id = excluded.auth_id,
+			file_name = excluded.file_name,
+			identity_fingerprint = excluded.identity_fingerprint,
+			selected_count = excluded.selected_count,
+			success_count = excluded.success_count,
+			failure_count = excluded.failure_count,
+			recent_buckets_json = excluded.recent_buckets_json,
+			generation = auth_runtime_stats.generation + 1,
+			updated_at_ms = excluded.updated_at_ms
+		where excluded.updated_at_ms >= auth_runtime_stats.updated_at_ms`, item.AuthIndex, item.AuthID, item.FileName,
+		item.IdentityFingerprint, item.SelectedCount, item.SuccessCount, item.FailureCount, string(buckets),
+		item.Generation, item.UpdatedAtMS)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	return affected > 0, nil
+}
+
+func (s *Store) SetAuthRuntimeStats(ctx context.Context, item AuthRuntimeStats) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	changed, err := setAuthRuntimeStatsTx(ctx, tx, item)
+	if err != nil {
+		return err
+	}
+	if changed {
+		if err := bumpRuntimeGenerationTx(ctx, tx, "auth_runtime_stats", time.Now().UnixMilli()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ImportAuthRuntimeStats(ctx context.Context, items []AuthRuntimeStats) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	imported := 0
+	for _, item := range items {
+		changed, err := setAuthRuntimeStatsTx(ctx, tx, item)
+		if err != nil {
+			return 0, err
+		}
+		if changed {
+			imported++
+		}
+	}
+	if imported > 0 {
+		if err := bumpRuntimeGenerationTx(ctx, tx, "auth_runtime_stats", time.Now().UnixMilli()); err != nil {
+			return 0, err
+		}
+	}
+	return imported, tx.Commit()
+}
+
+func (s *Store) DeleteAuthRuntimeState(ctx context.Context, authID, authIndex, fileName string) error {
+	s.quotaCacheMu.Lock()
+	defer s.quotaCacheMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `delete from auth_runtime_stats where
+		(? != '' and auth_id = ?) or (? != '' and auth_index = ?) or (? != '' and file_name = ?)`,
+		authID, authID, authIndex, authIndex, fileName, fileName)
+	if err != nil {
+		return err
+	}
+	quotaResult, err := tx.ExecContext(ctx, `delete from quota_cache where
+		(? != '' and auth_index = ?) or (? != '' and file_name = ?)`, authIndex, authIndex, fileName, fileName)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		if err := bumpRuntimeGenerationTx(ctx, tx, "auth_runtime_stats", now); err != nil {
+			return err
+		}
+	}
+	if affected, _ := quotaResult.RowsAffected(); affected > 0 {
+		if err := bumpRuntimeGenerationTx(ctx, tx, "quota_cache", now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) GetModelPrices(ctx context.Context) (map[string]ModelPrice, error) {

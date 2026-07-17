@@ -177,6 +177,13 @@ AUTH_FILES_QUOTA_SORT_LABEL_KEYS = {
     'zh-TW.json': '可用額度由高到低',
 }
 
+AUTH_FILES_SELECTED_COUNT_LABEL_KEYS = {
+    'en.json': 'Scheduled',
+    'ru.json': 'Назначено',
+    'zh-CN.json': '调度',
+    'zh-TW.json': '調度',
+}
+
 CLAUDE_MODEL_ID_CLOAK_LOCALE_KEYS = {
     'en.json': {
         'title': 'Anthropic Client Compatibility',
@@ -1452,7 +1459,6 @@ def patch_auth_files_page_sorting(target: Path) -> None:
         "    return options;\n"
         "  }, [planSortAvailable, quotaSortAvailable, t]);\n",
     )
-
     replace_once(
         page_path,
         "  const sorted = useMemo(() => {\n"
@@ -1511,6 +1517,66 @@ def patch_auth_files_page_sorting(target: Path) -> None:
         "                      value={effectiveSortMode}\n"
         "                      options={sortOptions}\n"
         "                      onChange={handleSortModeChange}\n",
+    )
+
+
+def patch_auth_files_runtime_state(target: Path) -> None:
+    type_path = target / 'src/types/authFile.ts'
+    card_path = target / 'src/features/authFiles/components/AuthFileCard.tsx'
+    page_path = target / 'src/pages/AuthFilesPage.tsx'
+
+    insert_once(
+        type_path,
+        "  success?: unknown;\n",
+        "  selected?: unknown;\n  success?: unknown;\n",
+        "selected?: unknown;",
+    )
+    replace_once(
+        card_path,
+        "  const fileStats = {\n    success: normalizeUsageTotal(file.success),\n    failure: normalizeUsageTotal(file.failed),\n  };\n",
+        "  const fileStats = {\n    selected: normalizeUsageTotal(file.selected),\n    success: normalizeUsageTotal(file.success),\n    failure: normalizeUsageTotal(file.failed),\n  };\n",
+    )
+    insert_once(
+        card_path,
+        "            <div className={`${styles.cardStats} ${compact ? styles.cardStatsCompact : ''}`}>\n",
+        "            <div className={`${styles.cardStats} ${compact ? styles.cardStatsCompact : ''}`}>\n"
+        "              <div className={styles.statPill}>\n"
+        "                <span className={styles.statLabel}>{t('auth_files.selected_count')}</span>\n"
+        "                <span className={styles.statValue}>{fileStats.selected}</span>\n"
+        "              </div>\n",
+        "t('auth_files.selected_count')",
+    )
+
+    insert_once(
+        page_path,
+        "import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';\n",
+        "import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';\n"
+        "import { quotaPersistenceMiddleware } from '@/extensions/quota/persistenceMiddleware';\n",
+        "quotaPersistenceMiddleware } from '@/extensions/quota/persistenceMiddleware'",
+    )
+    replace_once(
+        page_path,
+        "  const handleHeaderRefresh = useCallback(async () => {\n"
+        "    await Promise.all([loadFiles(), loadExcluded(), loadModelAlias()]);\n"
+        "  }, [loadFiles, loadExcluded, loadModelAlias]);\n",
+        "  const handleHeaderRefresh = useCallback(async () => {\n"
+        "    await Promise.all([\n"
+        "      loadFiles(),\n"
+        "      loadExcluded(),\n"
+        "      loadModelAlias(),\n"
+        "      quotaPersistenceMiddleware.ensureFresh(),\n"
+        "    ]);\n"
+        "  }, [loadFiles, loadExcluded, loadModelAlias]);\n",
+    )
+    insert_once(
+        page_path,
+        "  const existingTypes = useMemo(() => {\n",
+        "  useEffect(() => {\n"
+        "    if (!isCurrentLayer) return;\n"
+        "    void quotaPersistenceMiddleware.ensureFresh();\n"
+        "  }, [files, isCurrentLayer]);\n\n"
+        "  const existingTypes = useMemo(() => {\n",
+        "}, [files, isCurrentLayer]);",
     )
 
 
@@ -1942,6 +2008,10 @@ def patch_locales(target: Path) -> None:
             locale_path.name,
             AUTH_FILES_QUOTA_SORT_LABEL_KEYS['en.json'],
         )
+        data.setdefault('auth_files', {})['selected_count'] = AUTH_FILES_SELECTED_COUNT_LABEL_KEYS.get(
+            locale_path.name,
+            AUTH_FILES_SELECTED_COUNT_LABEL_KEYS['en.json'],
+        )
         data.setdefault('gemini_cli_quota', {}).update(gemini_cli_locale['quota'])
         cloak_locale = CLAUDE_MODEL_ID_CLOAK_LOCALE_KEYS.get(
             locale_path.name,
@@ -1995,6 +2065,7 @@ def main() -> None:
     patch_account_inspection_page(target)
     patch_auth_files_page_search(target)
     patch_auth_files_page_sorting(target)
+    patch_auth_files_runtime_state(target)
     patch_runtime_detection(target)
     patch_supporting_api_and_types(target)
     patch_claude_model_id_cloak_setting(target)

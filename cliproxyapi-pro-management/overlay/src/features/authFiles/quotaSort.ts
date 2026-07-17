@@ -11,6 +11,9 @@ const QUOTA_SORT_PROVIDERS = new Set([
   'xai',
 ]);
 
+export const AUTH_FILE_QUOTA_SORT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const AUTH_FILE_QUOTA_SORT_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
 type QuotaSortStore = Pick<
   ReturnType<typeof useQuotaStore.getState>,
   | 'antigravityQuota'
@@ -82,9 +85,16 @@ const minimumRemainingPercent = (items: unknown): number | null => {
   return values.length > 0 ? Math.min(...values) : null;
 };
 
+const isFreshQuotaState = (state: Record<string, unknown>): boolean => {
+  const cachedAt = normalizeNumber(state.cachedAt);
+  if (cachedAt === null || cachedAt <= 0) return false;
+  const age = Date.now() - cachedAt;
+  return age >= -AUTH_FILE_QUOTA_SORT_MAX_FUTURE_SKEW_MS && age <= AUTH_FILE_QUOTA_SORT_MAX_AGE_MS;
+};
+
 const antigravityRemainingPercent = (quota: unknown): number | null => {
   const state = toRecord(quota);
-  if (!state || state.status !== 'success' || !Array.isArray(state.groups)) return null;
+  if (!state || state.status !== 'success' || !isFreshQuotaState(state) || !Array.isArray(state.groups)) return null;
   const buckets = state.groups.flatMap((group) => {
     const record = toRecord(group);
     return record && Array.isArray(record.buckets) ? record.buckets : [];
@@ -94,13 +104,13 @@ const antigravityRemainingPercent = (quota: unknown): number | null => {
 
 const windowedRemainingPercent = (quota: unknown, key: 'windows' | 'buckets' | 'rows'): number | null => {
   const state = toRecord(quota);
-  if (!state || state.status !== 'success') return null;
+  if (!state || state.status !== 'success' || !isFreshQuotaState(state)) return null;
   return minimumRemainingPercent(state[key]);
 };
 
 const xaiRemainingPercent = (quota: unknown): number | null => {
   const state = toRecord(quota);
-  if (!state || state.status !== 'success') return null;
+  if (!state || state.status !== 'success' || !isFreshQuotaState(state)) return null;
   const billing = toRecord(state.billing);
   if (!billing) return null;
 

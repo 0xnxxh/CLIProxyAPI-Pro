@@ -29,12 +29,15 @@ class QuotaPersistenceMiddleware {
   private isPreloading = false;
   private syncQueue = new Set<string>();
   private isFlushing = false;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryDelayMs = 1_000;
   private syncedVersions = new Map<string, string>();
-  private loadedThrough = 0;
-  private reloadRequestedAt = 0;
+  private loadedGeneration = 0;
+  private reloadRequested = false;
   private preloadPromise: Promise<void> | null = null;
   private ensureFreshPromise: Promise<void> | null = null;
   private lastQuotaMaps = new Map<QuotaProviderType, Record<string, QuotaStatusState>>();
+  private hydratedKeys = new Map<QuotaProviderType, Set<string>>();
 
   /**
    * Start the middleware
@@ -54,7 +57,7 @@ class QuotaPersistenceMiddleware {
     console.log('QuotaPersistenceMiddleware: Starting...');
 
     // Preload cache first
-    this.runPreload().then(() => {
+    this.ensureFresh().then(() => {
       console.log('QuotaPersistenceMiddleware: Cache preloaded');
     });
 
@@ -82,6 +85,11 @@ class QuotaPersistenceMiddleware {
     }
     this.lastQuotaMaps.clear();
     this.syncedVersions.clear();
+    this.hydratedKeys.clear();
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     void this.flushSyncQueue();
     console.log('QuotaPersistenceMiddleware: Stopped');
   }
@@ -176,27 +184,41 @@ class QuotaPersistenceMiddleware {
         const synced = await sqliteQuotaCache.set(provider, fileName, { ...quotaState, cachedAt }, cachedAt);
         if (synced) {
           this.syncedVersions.set(key, version);
+          this.retryDelayMs = 1_000;
+        } else {
+          this.syncQueue.add(key);
+          this.scheduleRetry();
+          break;
         }
       }
     } catch (err) {
       console.error('QuotaPersistenceMiddleware: Failed to sync to SQLite quota cache:', err);
     } finally {
       this.isFlushing = false;
-      if (this.syncQueue.size > 0) {
+      if (this.syncQueue.size > 0 && !this.retryTimer) {
         void this.flushSyncQueue();
       }
     }
+  }
+
+  private scheduleRetry() {
+    if (this.retryTimer) return;
+    const delay = this.retryDelayMs;
+    this.retryDelayMs = Math.min(this.retryDelayMs * 2, 30_000);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.flushSyncQueue();
+    }, delay);
   }
 
   async ensureFresh() {
     if (this.ensureFreshPromise) return this.ensureFreshPromise;
 
     this.ensureFreshPromise = (async () => {
-      await this.preloadPromise;
       const stats = await sqliteQuotaCache.getStats();
-      const targetUpdatedAt = Math.max(this.reloadRequestedAt, stats.updatedAt);
-      if (targetUpdatedAt <= 0 || targetUpdatedAt <= this.loadedThrough) return;
-      await this.runPreload(targetUpdatedAt);
+      if (!this.reloadRequested && stats.generation > 0 && stats.generation <= this.loadedGeneration) return;
+      await this.runPreload(stats.generation);
+      this.reloadRequested = false;
     })().finally(() => {
       this.ensureFreshPromise = null;
     });
@@ -204,48 +226,41 @@ class QuotaPersistenceMiddleware {
     return this.ensureFreshPromise;
   }
 
-  private runPreload(loadedAt = Date.now()) {
+  private runPreload(generation = 0) {
     if (this.preloadPromise) return this.preloadPromise;
 
-    this.preloadPromise = this.preloadCache(loadedAt).finally(() => {
+    this.preloadPromise = this.preloadCache(generation).finally(() => {
       this.preloadPromise = null;
     });
 
     return this.preloadPromise;
   }
 
-  markStale(updatedAt = Date.now()) {
-    this.reloadRequestedAt = Math.max(this.reloadRequestedAt, updatedAt);
+  markStale() {
+    this.reloadRequested = true;
   }
 
   /**
    * Preload cache from SQLite quota cache to Zustand store
    */
-  private async preloadCache(loadedAt = Date.now()) {
+  private async preloadCache(generation = 0) {
     this.isPreloading = true;
-    let latestCachedAt = 0;
 
     try {
       const cachedEntries = await sqliteQuotaCache.getAll();
-      if (cachedEntries.length === 0) {
-        this.loadedThrough = Math.max(this.loadedThrough, loadedAt);
-        return;
-      }
-
       const entriesByProvider = new Map<QuotaProviderType, QuotaCacheEntry[]>();
       cachedEntries.forEach((entry) => {
         if (!isQuotaProviderType(entry.provider)) return;
-        latestCachedAt = Math.max(latestCachedAt, entry.cachedAt ?? 0);
         const provider = entry.provider;
         const entries = entriesByProvider.get(provider) ?? [];
         entries.push(entry);
         entriesByProvider.set(provider, entries);
       });
 
-      entriesByProvider.forEach((entries, provider) => {
-        this.preloadProvider(provider, entries);
+      QUOTA_PROVIDER_TYPES.forEach((provider) => {
+        this.preloadProvider(provider, entriesByProvider.get(provider) ?? []);
       });
-      this.loadedThrough = Math.max(this.loadedThrough, latestCachedAt, loadedAt);
+      this.loadedGeneration = Math.max(this.loadedGeneration, generation);
     } catch (err) {
       console.error('QuotaPersistenceMiddleware: Failed to preload cache:', err);
     } finally {
@@ -258,7 +273,7 @@ class QuotaPersistenceMiddleware {
    */
   private preloadProvider(provider: QuotaProviderType, cachedEntries: QuotaCacheEntry[]) {
     const cached = new Map(cachedEntries.map((entry) => [entry.fileName, entry]));
-    if (cached.size === 0) return;
+    const previouslyHydrated = this.hydratedKeys.get(provider) ?? new Set<string>();
 
     const setterName = getQuotaProviderSetterName(provider);
     const storeState = useQuotaStore.getState();
@@ -268,6 +283,12 @@ class QuotaPersistenceMiddleware {
       setter((prev) => {
         let changed = false;
         const next = { ...prev };
+        previouslyHydrated.forEach((fileName) => {
+          if (cached.has(fileName) || !(fileName in next)) return;
+          delete next[fileName];
+          this.syncedVersions.delete(`${provider}:${fileName}`);
+          changed = true;
+        });
         cached.forEach((entry, fileName) => {
           if (!this.isCacheEntryCompatible(provider, entry.data)) {
             void sqliteQuotaCache.delete(provider, fileName);
@@ -280,6 +301,8 @@ class QuotaPersistenceMiddleware {
         });
         return changed ? next : prev;
       });
+
+      this.hydratedKeys.set(provider, new Set(cached.keys()));
 
       console.log(`QuotaPersistenceMiddleware: Preloaded ${cached.size} entries for ${provider}`);
     }
@@ -338,6 +361,9 @@ class QuotaPersistenceMiddleware {
     await sqliteQuotaCache.clear();
     this.syncedVersions.clear();
     this.syncQueue.clear();
+    this.hydratedKeys.clear();
+    this.loadedGeneration = 0;
+    this.reloadRequested = true;
     console.log('QuotaPersistenceMiddleware: Cache cleared');
   }
 }

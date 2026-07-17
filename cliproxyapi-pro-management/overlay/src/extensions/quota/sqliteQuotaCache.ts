@@ -7,7 +7,12 @@ export interface QuotaCacheEntry<T = unknown> {
   data: T;
   cachedAt: number;
   accessedAt: number;
+  observedAt: number;
+  storedAt: number;
   version: number;
+  revision: number;
+  authIndex?: string;
+  identityFingerprint?: string;
 }
 
 interface QuotaCacheListResponse<T = unknown> {
@@ -17,6 +22,7 @@ interface QuotaCacheListResponse<T = unknown> {
 interface QuotaCacheStatsResponse {
   totalEntries?: number;
   updatedAt?: number;
+  generation?: number;
 }
 
 class SqliteQuotaCache {
@@ -64,8 +70,9 @@ class SqliteQuotaCache {
         fileName,
         data,
         cachedAt,
+        observedAt: cachedAt,
         accessedAt: Date.now(),
-        version: 1,
+        version: Number((data as { schemaVersion?: unknown } | null)?.schemaVersion) || 1,
       });
       return true;
     } catch (err) {
@@ -111,13 +118,17 @@ class SqliteQuotaCache {
     }
   }
 
-  async getStats(): Promise<{ totalEntries: number; updatedAt: number }> {
+  async getStats(): Promise<{ totalEntries: number; updatedAt: number; generation: number }> {
     try {
       const stats = await apiClient.get<QuotaCacheStatsResponse>('/usage/quota-cache', { params: { stats: '1' } });
-      return { totalEntries: stats.totalEntries ?? 0, updatedAt: stats.updatedAt ?? 0 };
+      return {
+        totalEntries: stats.totalEntries ?? 0,
+        updatedAt: stats.updatedAt ?? 0,
+        generation: stats.generation ?? 0,
+      };
     } catch (err) {
       console.error('SQLite quota cache getStats error:', err);
-      return { totalEntries: 0, updatedAt: 0 };
+      return { totalEntries: 0, updatedAt: 0, generation: 0 };
     }
   }
 }

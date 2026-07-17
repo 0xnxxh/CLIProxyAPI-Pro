@@ -2,6 +2,7 @@ package embeddedusage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -609,5 +610,91 @@ func TestRecentDeadLettersLimitsPayload(t *testing.T) {
 	}
 	if strings.Contains(samples[0].Payload, "sk-secret") || !strings.Contains(samples[0].Payload, "[redacted]") {
 		t.Fatalf("dead letter payload was not redacted: %s", samples[0].Payload)
+	}
+}
+
+func TestQuotaCacheRejectsStaleWritesAndTracksGeneration(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	initial, err := store.QuotaCacheStats(ctx)
+	if err != nil {
+		t.Fatalf("QuotaCacheStats() error = %v", err)
+	}
+	newer := QuotaCacheEntry{Provider: "codex", FileName: "a.json", Data: json.RawMessage(`{"status":"success","value":2}`), CachedAt: 200, ObservedAt: 200}
+	if err := store.SetQuotaCache(ctx, newer); err != nil {
+		t.Fatalf("SetQuotaCache(newer) error = %v", err)
+	}
+	if err := store.SetQuotaCache(ctx, QuotaCacheEntry{Provider: "codex", FileName: "a.json", Data: json.RawMessage(`{"status":"success","value":1}`), CachedAt: 100, ObservedAt: 100}); err != nil {
+		t.Fatalf("SetQuotaCache(stale) error = %v", err)
+	}
+	entries, err := store.GetQuotaCache(ctx, "codex", "a.json")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("GetQuotaCache() = %+v, %v", entries, err)
+	}
+	if !strings.Contains(string(entries[0].Data), `"value":2`) || entries[0].Revision != 1 {
+		t.Fatalf("quota entry = %+v, want newer revision 1", entries[0])
+	}
+	afterSet, _ := store.QuotaCacheStats(ctx)
+	if afterSet.Generation != initial.Generation+1 {
+		t.Fatalf("generation after set = %d, want %d", afterSet.Generation, initial.Generation+1)
+	}
+	if err := store.DeleteQuotaCache(ctx, "codex", "a.json"); err != nil {
+		t.Fatalf("DeleteQuotaCache() error = %v", err)
+	}
+	afterDelete, _ := store.QuotaCacheStats(ctx)
+	if afterDelete.Generation != afterSet.Generation+1 {
+		t.Fatalf("generation after delete = %d, want %d", afterDelete.Generation, afterSet.Generation+1)
+	}
+}
+
+func TestRoutingCursorAndAuthRuntimeStatsRoundTrip(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	cursor := RoutingCursorState{CursorKey: "single|codex|gpt-5|0|all", LastAuthID: "auth-b", UpdatedAtMS: 123}
+	if err := store.SetRoutingCursorState(ctx, cursor); err != nil {
+		t.Fatalf("SetRoutingCursorState() error = %v", err)
+	}
+	gotCursor, ok, err := store.GetRoutingCursorState(ctx, cursor.CursorKey)
+	if err != nil || !ok || gotCursor.LastAuthID != cursor.LastAuthID {
+		t.Fatalf("GetRoutingCursorState() = %+v, %v, %v", gotCursor, ok, err)
+	}
+	stats := AuthRuntimeStats{
+		AuthIndex: "idx-a", AuthID: "auth-a", IdentityFingerprint: "fp-a",
+		SelectedCount: 7, SuccessCount: 5, FailureCount: 2, UpdatedAtMS: 456,
+		RecentBuckets: []RuntimeRequestBucket{{BucketID: 100, Success: 5, Failed: 2}},
+	}
+	if err := store.SetAuthRuntimeStats(ctx, stats); err != nil {
+		t.Fatalf("SetAuthRuntimeStats() error = %v", err)
+	}
+	gotStats, ok, err := store.GetAuthRuntimeStats(ctx, stats.AuthIndex, stats.AuthID)
+	if err != nil || !ok || gotStats.SelectedCount != 7 || len(gotStats.RecentBuckets) != 1 {
+		t.Fatalf("GetAuthRuntimeStats() = %+v, %v, %v", gotStats, ok, err)
+	}
+	exported, err := store.ExportJSONL(ctx)
+	if err != nil {
+		t.Fatalf("ExportJSONL() error = %v", err)
+	}
+	if !strings.Contains(string(exported), `"record_type":"routing_cursor_state"`) ||
+		!strings.Contains(string(exported), `"record_type":"auth_runtime_stats"`) {
+		t.Fatalf("export missing runtime state records: %s", exported)
+	}
+}
+
+func TestQueuedAuthRuntimeDeleteCannotBeOverwrittenByPendingSnapshot(t *testing.T) {
+	store := openTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := &Service{ctx: ctx, store: store}
+	SetDefaultService(service)
+	defer stopRuntimeStateWriter(service)
+
+	QueueAuthRuntimeStats(AuthRuntimeStats{
+		AuthIndex: "idx-delete", AuthID: "auth-delete", SelectedCount: 3, UpdatedAtMS: time.Now().UnixMilli(),
+	})
+	if err := DeleteAuthRuntimeState(context.Background(), "auth-delete", "idx-delete", "delete.json"); err != nil {
+		t.Fatalf("DeleteAuthRuntimeState() error = %v", err)
+	}
+	if stats, ok, err := store.GetAuthRuntimeStats(context.Background(), "idx-delete", "auth-delete"); err != nil || ok {
+		t.Fatalf("GetAuthRuntimeStats() after delete = %+v, %v, %v; want missing", stats, ok, err)
 	}
 }

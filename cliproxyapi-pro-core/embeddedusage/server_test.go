@@ -537,6 +537,50 @@ func TestUsageExportImportPreservesAntigravitySubscriptionQuotaCache(t *testing.
 	}
 }
 
+func TestUsageExportImportPreservesRoutingCursorAndAuthRuntimeStats(t *testing.T) {
+	sourceStore := openTestStore(t)
+	ctx := context.Background()
+	if err := sourceStore.SetRoutingCursorState(ctx, RoutingCursorState{
+		CursorKey: "single|codex|gpt-5|0|all", LastAuthID: "auth-b", UpdatedAtMS: 100,
+	}); err != nil {
+		t.Fatalf("SetRoutingCursorState() error = %v", err)
+	}
+	if err := sourceStore.SetAuthRuntimeStats(ctx, AuthRuntimeStats{
+		AuthIndex: "idx-a", AuthID: "auth-a", SelectedCount: 9, SuccessCount: 7, FailureCount: 2,
+		RecentBuckets: []RuntimeRequestBucket{{BucketID: 123, Success: 7, Failed: 2}}, UpdatedAtMS: 200,
+	}); err != nil {
+		t.Fatalf("SetAuthRuntimeStats() error = %v", err)
+	}
+
+	exportRecorder := httptest.NewRecorder()
+	testUsageRouter(sourceStore).ServeHTTP(exportRecorder, httptest.NewRequest(http.MethodGet, "/usage/export", nil))
+	if exportRecorder.Code != http.StatusOK {
+		t.Fatalf("export status = %d; body=%s", exportRecorder.Code, exportRecorder.Body.String())
+	}
+
+	targetStore := openTestStore(t)
+	importRecorder := httptest.NewRecorder()
+	testUsageRouter(targetStore).ServeHTTP(importRecorder, httptest.NewRequest(http.MethodPost, "/usage/import", bytes.NewReader(exportRecorder.Body.Bytes())))
+	if importRecorder.Code != http.StatusOK {
+		t.Fatalf("import status = %d; body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(importRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal(import response) error = %v", err)
+	}
+	if response["routingCursors"] != float64(1) || response["authRuntimeStats"] != float64(1) {
+		t.Fatalf("import response = %+v", response)
+	}
+	cursor, ok, err := targetStore.GetRoutingCursorState(ctx, "single|codex|gpt-5|0|all")
+	if err != nil || !ok || cursor.LastAuthID != "auth-b" {
+		t.Fatalf("restored cursor = %+v, %v, %v", cursor, ok, err)
+	}
+	stats, ok, err := targetStore.GetAuthRuntimeStats(ctx, "idx-a", "auth-a")
+	if err != nil || !ok || stats.SelectedCount != 9 || stats.SuccessCount != 7 || stats.FailureCount != 2 {
+		t.Fatalf("restored stats = %+v, %v, %v", stats, ok, err)
+	}
+}
+
 func TestUsageExportImportRestoresLatestAccountInspectionSnapshot(t *testing.T) {
 	defer SetAccountInspectionSnapshotHandlers(nil, nil)
 

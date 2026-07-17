@@ -2958,10 +2958,12 @@ func syncAuthInspectionLastError(auth *coreauth.Auth, lastError *coreauth.Error)
 		auth.Metadata = make(map[string]any)
 	}
 	auth.Metadata["last_error"] = map[string]any{
-		"code":        lastError.Code,
-		"message":     lastError.Message,
-		"retryable":   lastError.Retryable,
-		"http_status": lastError.HTTPStatus,
+		"code":          lastError.Code,
+		"message":       lastError.Message,
+		"retryable":     lastError.Retryable,
+		"http_status":   lastError.HTTPStatus,
+		"source":        "account_inspection",
+		"updated_at_ms": time.Now().UnixMilli(),
 	}
 }
 
@@ -3125,9 +3127,7 @@ func writePluginVirtualManagedMetadataToSourceFile(sourcePath string, auth *core
 	} else {
 		delete(source, "last_error")
 	}
-	if value, ok := auth.Metadata["quota_cache"]; ok {
-		source["quota_cache"] = value
-	}
+	delete(source, "quota_cache")
 	if value, ok := auth.Metadata[routingProtectionMetadataKey]; ok {
 		source[routingProtectionMetadataKey] = value
 	} else {
@@ -3826,34 +3826,43 @@ func jsonShape(value any) any {
 }
 
 func (s *accountInspectionScheduler) persistQuotaState(ctx context.Context, account accountInspectionAccount, state map[string]any) {
-	if err := persistQuotaState(ctx, account.Provider, account.FileName, state); err != nil {
+	if err := persistQuotaState(ctx, account, state); err != nil {
 		s.appendLog("warning", fmt.Sprintf("%s 配额缓存写入失败：%s", account.identity(), err.Error()))
-	}
-	if err := s.persistQuotaStateToAuth(ctx, account, state); err != nil {
-		s.appendLog("warning", fmt.Sprintf("%s 配额状态写入认证文件失败：%s", account.identity(), err.Error()))
 	}
 }
 
-func persistQuotaState(ctx context.Context, provider string, fileName string, state map[string]any) error {
+func persistQuotaState(ctx context.Context, account accountInspectionAccount, state map[string]any) error {
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UnixMilli()
-	return embeddedusage.SetQuotaCache(ctx, embeddedusage.QuotaCacheEntry{ID: provider + ":" + fileName, Provider: provider, FileName: fileName, Data: raw, CachedAt: now, AccessedAt: now, Version: 1})
-}
-
-func (s *accountInspectionScheduler) persistQuotaStateToAuth(ctx context.Context, account accountInspectionAccount, state map[string]any) error {
-	if account.AuthIndex == "" || state == nil {
-		return nil
+	observedAt := now
+	if cachedAt, ok := intFromAny(state["cachedAt"]); ok && cachedAt > 0 {
+		observedAt = int64(cachedAt)
 	}
-	stateCopy := cloneAnyMapForInspection(state)
-	return s.updateInspectionAuth(ctx, account.AuthIndex, func(auth *coreauth.Auth) {
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["quota_cache"] = stateCopy
-		auth.UpdatedAt = time.Now()
+	version := 1
+	if schemaVersion, ok := intFromAny(state["schemaVersion"]); ok && schemaVersion > 0 {
+		version = schemaVersion
+	}
+	fingerprintSource := strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(account.Provider)),
+		strings.ToLower(strings.TrimSpace(account.FileName)),
+		strings.ToLower(strings.TrimSpace(account.Email)),
+		strings.ToLower(strings.TrimSpace(account.Name)),
+	}, "|")
+	fingerprint := sha256.Sum256([]byte(fingerprintSource))
+	return embeddedusage.SetQuotaCache(ctx, embeddedusage.QuotaCacheEntry{
+		ID:                  account.Provider + ":" + account.FileName,
+		Provider:            account.Provider,
+		FileName:            account.FileName,
+		AuthIndex:           account.AuthIndex,
+		IdentityFingerprint: hex.EncodeToString(fingerprint[:]),
+		Data:                raw,
+		CachedAt:            observedAt,
+		ObservedAt:          observedAt,
+		AccessedAt:          now,
+		Version:             version,
 	})
 }
 
