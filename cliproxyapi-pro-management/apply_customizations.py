@@ -359,7 +359,7 @@ def patch_modal_focus_restore(target: Path) -> None:
 def patch_modal_scroll_lock(target: Path) -> None:
     path = target / 'src/components/ui/scrollLock.ts'
     text = read(path)
-    replacement_marker = "const snapshot = {\n  bodyOverflow: '',"
+    replacement_marker = "  locksDocumentScroll: false,"
     if replacement_marker in text:
         return
 
@@ -371,18 +371,33 @@ def patch_modal_scroll_lock(target: Path) -> None:
         raise RuntimeError(f'Pattern not found in {path}: scroll lock implementation')
 
     current = text[start:end]
-    required = (
+    upstream_markers = (
         "body.style.position = 'fixed';",
         "body.style.width = '100%';",
         'contentEl.scrollTo(',
         'window.scrollTo(',
     )
-    missing = [marker for marker in required if marker not in current]
-    if missing:
-        raise RuntimeError(f'Pattern not found in {path}: {missing[0]!r}')
+    previous_patch_markers = (
+        "  bodyOverflow: '',",
+        "  htmlOverflow: '',",
+        "    body.style.overflow = 'hidden';",
+        "    html.style.overflow = 'hidden';",
+    )
+    if not all(marker in current for marker in upstream_markers) and not all(
+        marker in current for marker in previous_patch_markers
+    ):
+        raise RuntimeError(f'Pattern not found in {path}: supported scroll lock implementation')
 
     replacement = (
         "const snapshot = {\n"
+        "  scrollX: 0,\n"
+        "  scrollY: 0,\n"
+        "  locksDocumentScroll: false,\n"
+        "  bodyPosition: '',\n"
+        "  bodyTop: '',\n"
+        "  bodyLeft: '',\n"
+        "  bodyRight: '',\n"
+        "  bodyWidth: '',\n"
         "  bodyOverflow: '',\n"
         "  htmlOverflow: '',\n"
         "};\n\n"
@@ -391,10 +406,28 @@ def patch_modal_scroll_lock(target: Path) -> None:
         "  if (activeLockCount === 0) {\n"
         "    const body = document.body;\n"
         "    const html = document.documentElement;\n\n"
+        "    const scrollingElement = document.scrollingElement;\n"
+        "    snapshot.scrollX = window.scrollX || window.pageXOffset || 0;\n"
+        "    snapshot.scrollY = window.scrollY || window.pageYOffset || scrollingElement?.scrollTop || 0;\n"
+        "    snapshot.locksDocumentScroll = Boolean(\n"
+        "      scrollingElement && scrollingElement.scrollHeight > scrollingElement.clientHeight + 1\n"
+        "    );\n"
+        "    snapshot.bodyPosition = body.style.position;\n"
+        "    snapshot.bodyTop = body.style.top;\n"
+        "    snapshot.bodyLeft = body.style.left;\n"
+        "    snapshot.bodyRight = body.style.right;\n"
+        "    snapshot.bodyWidth = body.style.width;\n"
         "    snapshot.bodyOverflow = body.style.overflow;\n"
         "    snapshot.htmlOverflow = html.style.overflow;\n\n"
         "    body.classList.add(MODAL_LOCK_CLASS);\n"
         "    html.classList.add(MODAL_LOCK_CLASS);\n"
+        "    if (snapshot.locksDocumentScroll) {\n"
+        "      body.style.position = 'fixed';\n"
+        "      body.style.top = `-${snapshot.scrollY}px`;\n"
+        "      body.style.left = '0';\n"
+        "      body.style.right = '0';\n"
+        "      body.style.width = '100%';\n"
+        "    }\n"
         "    body.style.overflow = 'hidden';\n"
         "    html.style.overflow = 'hidden';\n"
         "  }\n"
@@ -405,11 +438,26 @@ def patch_modal_scroll_lock(target: Path) -> None:
         "  activeLockCount = Math.max(0, activeLockCount - 1);\n"
         "  if (activeLockCount === 0) {\n"
         "    const body = document.body;\n"
-        "    const html = document.documentElement;\n\n"
+        "    const html = document.documentElement;\n"
+        "    const scrollX = snapshot.scrollX;\n"
+        "    const scrollY = snapshot.scrollY;\n"
+        "    const restoreDocumentScroll = snapshot.locksDocumentScroll;\n\n"
         "    body.classList.remove(MODAL_LOCK_CLASS);\n"
         "    html.classList.remove(MODAL_LOCK_CLASS);\n"
+        "    body.style.position = snapshot.bodyPosition;\n"
+        "    body.style.top = snapshot.bodyTop;\n"
+        "    body.style.left = snapshot.bodyLeft;\n"
+        "    body.style.right = snapshot.bodyRight;\n"
+        "    body.style.width = snapshot.bodyWidth;\n"
         "    body.style.overflow = snapshot.bodyOverflow;\n"
         "    html.style.overflow = snapshot.htmlOverflow;\n"
+        "\n"
+        "    if (restoreDocumentScroll) {\n"
+        "      window.scrollTo({ top: scrollY, left: scrollX, behavior: 'auto' });\n"
+        "    }\n"
+        "    snapshot.scrollX = 0;\n"
+        "    snapshot.scrollY = 0;\n"
+        "    snapshot.locksDocumentScroll = false;\n"
         "  }\n"
         "}\n\n"
     )

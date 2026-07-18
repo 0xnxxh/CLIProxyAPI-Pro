@@ -89,7 +89,7 @@ class ModalCustomizationTest(unittest.TestCase):
             CUSTOMIZATIONS.flush_writes()
             self.assertEqual(patched, modal_path.read_text())
 
-    def test_scroll_lock_does_not_reflow_or_force_scroll_restore(self) -> None:
+    def test_scroll_lock_restores_only_document_scroll(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir)
             ui_dir = target / 'src/components/ui'
@@ -103,9 +103,13 @@ class ModalCustomizationTest(unittest.TestCase):
             patched = scroll_lock_path.read_text()
             self.assertIn("body.style.overflow = 'hidden';", patched)
             self.assertIn("html.style.overflow = 'hidden';", patched)
-            self.assertNotIn("body.style.position = 'fixed';", patched)
-            self.assertNotIn("body.style.width = '100%';", patched)
-            self.assertNotIn('scrollTo(', patched)
+            self.assertIn('scrollingElement.scrollHeight > scrollingElement.clientHeight + 1', patched)
+            self.assertIn('if (snapshot.locksDocumentScroll)', patched)
+            self.assertIn("body.style.position = 'fixed';", patched)
+            self.assertIn("body.style.top = `-${snapshot.scrollY}px`;", patched)
+            self.assertIn('if (restoreDocumentScroll)', patched)
+            self.assertIn("window.scrollTo({ top: scrollY, left: scrollX, behavior: 'auto' });", patched)
+            self.assertNotIn('contentEl.scrollTo(', patched)
 
             CUSTOMIZATIONS.patch_modal_scroll_lock(target)
             CUSTOMIZATIONS.flush_writes()
