@@ -31,6 +31,7 @@ import { normalizeAuthIndex } from '@/utils/authIndex';
 import type { QuotaConfig } from '@/components/quota/quotaConfigs';
 import type { QuotaRenderHelpers } from '@/components/quota/QuotaCard';
 import styles from '@/pages/QuotaPage.module.scss';
+import { resolveGeminiCliTierDisplayLabel } from './geminiCliTierLabels';
 
 const GEMINI_CLI_QUOTA_URL = 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota';
 const GEMINI_CLI_CODE_ASSIST_URL =
@@ -40,13 +41,6 @@ const GEMINI_CLI_REQUEST_HEADERS = {
   'Content-Type': 'application/json',
 };
 const GEMINI_CLI_G1_CREDIT_TYPE = 'GOOGLE_ONE_AI';
-const GEMINI_CLI_TIER_LABEL_KEYS: Record<string, string> = {
-  'free-tier': 'tier_free',
-  'legacy-tier': 'tier_legacy',
-  'standard-tier': 'tier_standard',
-  'g1-pro-tier': 'tier_pro',
-  'g1-ultra-tier': 'tier_ultra',
-};
 const QUOTA_PROGRESS_HIGH_THRESHOLD = 70;
 const QUOTA_PROGRESS_MEDIUM_THRESHOLD = 30;
 const geminiCliSupplementaryRequestIds = new Map<string, number>();
@@ -72,6 +66,15 @@ type GeminiCliQuotaGroupDefinition = {
   preferredModelId?: string;
   modelIds: string[];
 };
+
+const resolveGeminiCliTierDisplay = (
+  tierId: unknown,
+  upstreamLabel: unknown,
+  t: TFunction
+): string | null =>
+  resolveGeminiCliTierDisplayLabel(tierId, upstreamLabel, (labelKey) =>
+    t(`gemini_cli_quota.${labelKey}`)
+  );
 
 type PluginQuotaItem = {
   id: string;
@@ -461,7 +464,7 @@ const fetchGeminiCliQuota = async (
       modelIds: Array.isArray(item.model_ids) ? item.model_ids : [],
     }));
     const tierId = normalizeStringValue(snapshot.plan?.id);
-    const tierLabel = normalizeStringValue(snapshot.plan?.label) ?? tierId;
+    const tierLabel = resolveGeminiCliTierDisplay(tierId, snapshot.plan?.label, t);
     return {
       fileName: file.name,
       supplementaryRequestId: 0,
@@ -557,11 +560,7 @@ const resolveGeminiCliTierLabel = (
 ): string | null => {
   const tier = resolveGeminiCliTier(payload);
   const tierId = normalizeStringValue(tier?.id);
-  const tierName = normalizeStringValue(tier?.name);
-  if (tierName) return tierName;
-  const labelKey = tierId ? GEMINI_CLI_TIER_LABEL_KEYS[tierId.toLowerCase()] : undefined;
-  if (labelKey) return t(`gemini_cli_quota.${labelKey}`);
-  return tierId;
+  return resolveGeminiCliTierDisplay(tierId, tier?.name, t);
 };
 
 const resolveGeminiCliCreditBalance = (
@@ -586,8 +585,8 @@ const renderGeminiCliItems = (
   const { createElement: h, Fragment } = React;
   const buckets = quota.buckets ?? [];
   const nodes: ReactNode[] = [];
-  const tierLabel = quota.tierLabel ?? null;
   const tierId = quota.tierId ?? null;
+  const tierLabel = resolveGeminiCliTierDisplay(tierId, quota.tierLabel, t);
   const creditBalance = quota.creditBalance ?? null;
 
   if (tierLabel || creditBalance !== null) {
