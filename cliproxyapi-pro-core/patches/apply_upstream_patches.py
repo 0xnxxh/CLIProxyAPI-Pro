@@ -160,6 +160,195 @@ def replace_go_call_block(path: Path, call_start: str, new_block: str, present: 
 
 MODULE_PATH = module_path()
 
+# Add the optional QuotaProvider capability without changing ABI/schema v1.
+pluginapi_types = ROOT / 'sdk/pluginapi/types.go'
+replace_once(
+    pluginapi_types,
+    '\t// FrontendAuthProvider authenticates frontend requests before proxy handling.\n',
+    '\t// QuotaProvider fetches normalized per-auth quota and subscription snapshots.\n\tQuotaProvider QuotaProvider\n\t// FrontendAuthProvider authenticates frontend requests before proxy handling.\n',
+    'QuotaProvider QuotaProvider',
+)
+insert_before(
+    pluginapi_types,
+    '// ModelRegistrar registers plugin-provided models with the host.\n',
+    read_text(Path(__file__).resolve().parent / 'plugin_quota_api.go'),
+    'type QuotaProvider interface',
+)
+
+pluginabi_types = ROOT / 'sdk/pluginabi/types.go'
+replace_once(
+    pluginabi_types,
+    '\tMethodAuthRefresh    = "auth.refresh"\n',
+    '\tMethodAuthRefresh    = "auth.refresh"\n\n\tMethodQuotaIdentifier = "quota.identifier"\n\tMethodQuotaFetch      = "quota.fetch"\n',
+    'MethodQuotaIdentifier',
+)
+
+rpc_schema = ROOT / 'internal/pluginhost/rpc_schema.go'
+replace_once(
+    rpc_schema,
+    '\tAuthProvider                  bool                         `json:"auth_provider"`\n',
+    '\tAuthProvider                  bool                         `json:"auth_provider"`\n\tQuotaProvider                 bool                         `json:"quota_provider"`\n',
+    'QuotaProvider                 bool',
+)
+insert_before(
+    rpc_schema,
+    'type rpcAuthModelRequest struct {\n',
+    '''type rpcQuotaFetchRequest struct {
+\tpluginapi.QuotaFetchRequest
+\tHostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+''',
+    'type rpcQuotaFetchRequest struct',
+)
+replace_once(
+    rpc_schema,
+    '\t\tAuthProvider:                  caps.AuthProvider != nil,\n',
+    '\t\tAuthProvider:                  caps.AuthProvider != nil,\n\t\tQuotaProvider:                 caps.QuotaProvider != nil,\n',
+    'QuotaProvider:                 caps.QuotaProvider != nil',
+)
+
+rpc_client = ROOT / 'internal/pluginhost/rpc_client.go'
+insert_before(
+    rpc_client,
+    'type rpcFrontendAuthProvider struct {\n',
+    '''type rpcQuotaProvider struct {
+\t*rpcPluginAdapter
+}
+
+''',
+    'type rpcQuotaProvider struct',
+)
+replace_once(
+    rpc_client,
+    '''\tif resp.Capabilities.FrontendAuthProvider {
+\t\tplugin.Capabilities.FrontendAuthProvider = rpcFrontendAuthProvider{rpcPluginAdapter: adapter}
+\t}
+''',
+    '''\tif resp.Capabilities.QuotaProvider {
+\t\tplugin.Capabilities.QuotaProvider = rpcQuotaProvider{rpcPluginAdapter: adapter}
+\t}
+\tif resp.Capabilities.FrontendAuthProvider {
+\t\tplugin.Capabilities.FrontendAuthProvider = rpcFrontendAuthProvider{rpcPluginAdapter: adapter}
+\t}
+''',
+    'plugin.Capabilities.QuotaProvider = rpcQuotaProvider',
+)
+replace_once(
+    rpc_client,
+    '''\tcase pluginapi.AuthRefreshRequest:
+\t\treq.HTTPClient = nil
+\t\treturn req
+''',
+    '''\tcase pluginapi.AuthRefreshRequest:
+\t\treq.HTTPClient = nil
+\t\treturn req
+\tcase pluginapi.QuotaFetchRequest:
+\t\treq.HTTPClient = nil
+\t\treturn req
+\tcase rpcQuotaFetchRequest:
+\t\treq.HTTPClient = nil
+\t\treturn req
+''',
+    'case pluginapi.QuotaFetchRequest:',
+)
+insert_before(
+    rpc_client,
+    'func sanitizePluginMetadata(src map[string]any) map[string]any {\n',
+    '''func (p rpcQuotaProvider) Identifier() string {
+\treturn callPluginIdentifier(p.client, pluginabi.MethodQuotaIdentifier)
+}
+
+func (p rpcQuotaProvider) FetchQuota(ctx context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+\tcallbackID, closeCallback := p.openHostCallbackContext(ctx)
+\tdefer closeCallback()
+\treturn callPlugin[pluginapi.QuotaFetchResponse](ctx, p.client, pluginabi.MethodQuotaFetch, rpcQuotaFetchRequest{
+\t\tQuotaFetchRequest: req,
+\t\tHostCallbackID:    callbackID,
+\t})
+}
+
+''',
+    'func (p rpcQuotaProvider) FetchQuota',
+)
+
+plugin_host = ROOT / 'internal/pluginhost/host.go'
+replace_once(
+    plugin_host,
+    '\t\tcaps.AuthProvider != nil ||\n',
+    '\t\tcaps.AuthProvider != nil ||\n\t\tcaps.QuotaProvider != nil ||\n',
+    'caps.QuotaProvider != nil',
+)
+
+plugin_snapshot = ROOT / 'internal/pluginhost/snapshot.go'
+replace_once(
+    plugin_snapshot,
+    '\tOAuthProvider string\n',
+    '\tOAuthProvider string\n\tSupportsQuota bool\n\tQuotaProvider string\n\tQuotaMode     string\n',
+    'SupportsQuota bool',
+)
+replace_once(
+    plugin_snapshot,
+    '''\t\tout = append(out, RegisteredPluginInfo{
+''',
+    '''\t\tquotaProvider := record.plugin.Capabilities.QuotaProvider
+\t\tquotaProviderID := ""
+\t\tquotaMode := ""
+\t\tsupportsQuota := quotaProvider != nil
+\t\tif quotaProvider != nil && !h.isPluginFused(record.id) {
+\t\t\tif identifier, okIdentifier := h.callQuotaProviderIdentifier(record.id, quotaProvider); okIdentifier {
+\t\t\t\tquotaProviderID = identifier
+\t\t\t\tquotaMode = "native"
+\t\t\t}
+\t\t} else if identifier, okLegacy := h.legacyQuotaProviderForRecord(record); okLegacy {
+\t\t\tquotaProviderID = identifier
+\t\t\tquotaMode = "legacy-adapter"
+\t\t\tsupportsQuota = true
+\t\t}
+\t\tout = append(out, RegisteredPluginInfo{
+''',
+    'quotaProvider := record.plugin.Capabilities.QuotaProvider',
+)
+replace_once(
+    plugin_snapshot,
+    '\t\t\tOAuthProvider: oauthProvider,\n',
+    '\t\t\tOAuthProvider: oauthProvider,\n\t\t\tSupportsQuota: supportsQuota,\n\t\t\tQuotaProvider: quotaProviderID,\n\t\t\tQuotaMode: quotaMode,\n',
+    'QuotaProvider: quotaProviderID',
+)
+
+management_plugins = ROOT / 'internal/api/handlers/management/plugins.go'
+replace_once(
+    management_plugins,
+    '\tOAuthProvider    string                  `json:"oauth_provider"`\n',
+    '\tOAuthProvider    string                  `json:"oauth_provider"`\n\tSupportsQuota    bool                    `json:"supports_quota"`\n\tQuotaProvider    string                  `json:"quota_provider"`\n\tQuotaMode        string                  `json:"quota_mode"`\n',
+    'SupportsQuota    bool',
+)
+replace_once(
+    management_plugins,
+    '\t\t\tentry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)\n',
+    '\t\t\tentry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)\n\t\t\tentry.SupportsQuota = info.SupportsQuota\n\t\t\tentry.QuotaProvider = htmlsanitize.String(info.QuotaProvider)\n\t\t\tentry.QuotaMode = htmlsanitize.String(info.QuotaMode)\n',
+    'entry.SupportsQuota = info.SupportsQuota',
+)
+
+quota_provider_source = Path(__file__).resolve().parent / 'plugin_quota_provider.go'
+quota_provider_target = ROOT / 'internal/pluginhost/quota_provider.go'
+write_text(quota_provider_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(quota_provider_source)))
+quota_provider_test_source = Path(__file__).resolve().parent / 'plugin_quota_provider_test.go'
+quota_provider_test_target = ROOT / 'internal/pluginhost/quota_provider_test.go'
+write_text(quota_provider_test_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(quota_provider_test_source)))
+
+legacy_gemini_quota_source = Path(__file__).resolve().parent / 'plugin_gemini_cli_quota_legacy.go'
+legacy_gemini_quota_target = ROOT / 'internal/pluginhost/gemini_cli_quota_legacy.go'
+write_text(legacy_gemini_quota_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(legacy_gemini_quota_source)))
+legacy_gemini_quota_test_source = Path(__file__).resolve().parent / 'plugin_gemini_cli_quota_legacy_test.go'
+legacy_gemini_quota_test_target = ROOT / 'internal/pluginhost/gemini_cli_quota_legacy_test.go'
+write_text(legacy_gemini_quota_test_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(legacy_gemini_quota_test_source)))
+
+plugin_quota_management = ROOT / 'internal/api/handlers/management/plugin_quota.go'
+write_text(plugin_quota_management, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'plugin_quota_management.go')))
+plugin_quota_management_test = ROOT / 'internal/api/handlers/management/plugin_quota_test.go'
+write_text(plugin_quota_management_test, read_text(Path(__file__).resolve().parent / 'plugin_quota_management_test.go'))
+
 usage_manager = ROOT / 'sdk/cliproxy/usage/manager.go'
 replace_once(
     usage_manager,
@@ -2189,7 +2378,7 @@ replace_once(
 replace_once(
     server,
     '''\t\tmgmt.POST("/api-call", s.mgmt.APICall)\n''',
-    '''\t\tmgmt.POST("/api-call", s.mgmt.APICall)\n\t\ts.mgmt.RegisterAccountInspectionRoutes(mgmt)\n\t\ts.mgmt.RegisterRoutingPolicyRoutes(mgmt)\n''',
+    '''\t\tmgmt.POST("/api-call", s.mgmt.APICall)\n\t\ts.mgmt.RegisterPluginQuotaRoutes(mgmt)\n\t\ts.mgmt.RegisterAccountInspectionRoutes(mgmt)\n\t\ts.mgmt.RegisterRoutingPolicyRoutes(mgmt)\n''',
 )
 
 handler = ROOT / 'internal/api/handlers/management/handler.go'
@@ -3007,6 +3196,8 @@ subprocess.run([
     'internal/api/server.go',
     'internal/api/server_test.go',
     'internal/api/handlers/management/auth_files.go',
+    'internal/api/handlers/management/plugin_quota.go',
+    'internal/api/handlers/management/plugin_quota_test.go',
     'internal/config/sdk_config.go',
     'internal/logging/requestid.go',
     'internal/logging/requestmeta.go',
@@ -3018,6 +3209,13 @@ subprocess.run([
     'internal/config/routing_protection_config.go',
     'internal/pluginhost/gemini_cli_storage_compat.go',
     'internal/pluginhost/gemini_cli_storage_compat_test.go',
+    'internal/pluginhost/gemini_cli_quota_legacy.go',
+    'internal/pluginhost/gemini_cli_quota_legacy_test.go',
+    'internal/pluginhost/quota_provider.go',
+    'internal/pluginhost/quota_provider_test.go',
+    'internal/pluginhost/rpc_client.go',
+    'internal/pluginhost/rpc_schema.go',
+    'internal/pluginhost/snapshot.go',
     'internal/pluginstore/autoinstall.go',
     'internal/pluginstore/autoinstall_test.go',
     'internal/redisqueue/plugin.go',
@@ -3031,5 +3229,7 @@ subprocess.run([
     'sdk/cliproxy/auth/conductor.go',
     'sdk/cliproxy/auth/scheduler.go',
     'sdk/cliproxy/auth/types.go',
+    'sdk/pluginabi/types.go',
+    'sdk/pluginapi/types.go',
 ], cwd=ROOT, check=True)
 subprocess.run(['go', 'mod', 'tidy'], cwd=ROOT, check=True)

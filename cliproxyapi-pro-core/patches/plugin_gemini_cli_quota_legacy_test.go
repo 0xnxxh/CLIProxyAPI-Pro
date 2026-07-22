@@ -1,0 +1,103 @@
+package pluginhost
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+)
+
+type legacyGeminiCLIQuotaTestExecutor struct {
+	requests []*http.Request
+}
+
+func (e *legacyGeminiCLIQuotaTestExecutor) Identifier() string { return legacyGeminiCLIProvider }
+func (e *legacyGeminiCLIQuotaTestExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, nil
+}
+func (e *legacyGeminiCLIQuotaTestExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, nil
+}
+func (e *legacyGeminiCLIQuotaTestExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+func (e *legacyGeminiCLIQuotaTestExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, nil
+}
+func (e *legacyGeminiCLIQuotaTestExecutor) HttpRequest(_ context.Context, _ *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	e.requests = append(e.requests, req)
+	if strings.HasSuffix(req.URL.String(), ":retrieveUserQuota") {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(bytes.NewBufferString(`{"buckets":[
+				{"modelId":"gemini-2.0-flash","remainingFraction":0.9},
+				{"modelId":"gemini-3.1-pro-preview","remainingFraction":0.75,"remainingAmount":42}
+			]}`)),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewBufferString(`{"error":"temporary"}`)),
+	}, nil
+}
+
+func TestLegacyGeminiCLIQuotaAdapterUsesRegisteredExecutorAndRetainsPlan(t *testing.T) {
+	pluginExecutor := &fakeExecutor{identifier: legacyGeminiCLIProvider}
+	host := newHostWithRecords(capabilityRecord{
+		id: "geminicli",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Executor: pluginExecutor,
+		}},
+	})
+	executor := &legacyGeminiCLIQuotaTestExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	host.SetAuthManager(manager)
+	previous := &pluginapi.QuotaSnapshot{Plan: &pluginapi.QuotaPlan{ID: "g1-pro-tier", Kind: "pro", ObservedAtMS: 123}}
+	auth := &coreauth.Auth{
+		ID: "auth-1", Provider: legacyGeminiCLIProvider, FileName: "gemini.json",
+		Metadata: map[string]any{"project_id": "project-a"},
+	}
+
+	result := host.FetchQuota(context.Background(), auth, previous)
+	if !result.Handled || result.Err != nil || result.PluginID != "geminicli" {
+		t.Fatalf("FetchQuota() = %#v", result)
+	}
+	if len(executor.requests) != 2 {
+		t.Fatalf("executor requests = %d, want 2", len(executor.requests))
+	}
+	if len(result.Snapshot.Items) != 1 || result.Snapshot.Items[0].ID != "gemini-pro-series" {
+		t.Fatalf("quota items = %#v", result.Snapshot.Items)
+	}
+	if result.Snapshot.Plan == nil || result.Snapshot.Plan.ID != "g1-pro-tier" || !result.Snapshot.Plan.Stale {
+		t.Fatalf("retained plan = %#v", result.Snapshot.Plan)
+	}
+	if result.Snapshot.Metadata["quota_mode"] != "legacy-adapter" {
+		t.Fatalf("snapshot metadata = %#v", result.Snapshot.Metadata)
+	}
+	plugins := host.RegisteredPlugins()
+	if len(plugins) != 1 || !plugins[0].SupportsQuota || plugins[0].QuotaMode != "legacy-adapter" {
+		t.Fatalf("registered plugin info = %#v", plugins)
+	}
+}
+
+func TestLegacyGeminiCLIQuotaPlanPrefersPaidTier(t *testing.T) {
+	plan := legacyGeminiCLIQuotaPlan(map[string]any{
+		"currentTier": map[string]any{"id": "free-tier"},
+		"paidTier": map[string]any{
+			"id": "g1-ultra-tier", "name": "Google AI Ultra",
+			"availableCredits": []any{map[string]any{"creditType": legacyGeminiCLIGoogleOneAI, "creditAmount": float64(12)}},
+		},
+	}, 123)
+	if plan == nil || plan.ID != "g1-ultra-tier" || plan.Kind != "ultra" || plan.CreditBalance == nil || *plan.CreditBalance != 12 {
+		t.Fatalf("plan = %#v", plan)
+	}
+}

@@ -13,10 +13,12 @@ import {
   type QuotaProviderType,
 } from '@/utils/quota';
 import { sqliteQuotaCache, type QuotaCacheEntry } from './sqliteQuotaCache';
+import { normalizePersistedQuotaState } from './normalizedQuotaSnapshot';
 
 interface QuotaStatusState {
   status: 'idle' | 'loading' | 'success' | 'error';
   cachedAt?: number;
+  quotaProviderSnapshot?: boolean;
 }
 
 type QuotaStoreState = ReturnType<typeof useQuotaStore.getState>;
@@ -127,6 +129,7 @@ class QuotaPersistenceMiddleware {
       const key = `${provider}:${fileName}`;
       activeKeys.add(key);
       if (state.status !== 'success') return;
+      if (provider === 'gemini-cli' && state.quotaProviderSnapshot) return;
 
       const version = this.getSyncVersion(state);
       if (this.syncedVersions.get(key) === version) return;
@@ -178,6 +181,7 @@ class QuotaPersistenceMiddleware {
         const quotaState = quotaMap?.[fileName];
 
         if (quotaState?.status !== 'success') continue;
+        if (provider === 'gemini-cli' && quotaState.quotaProviderSnapshot) continue;
 
         const version = this.getSyncVersion(quotaState);
         const cachedAt = quotaState.cachedAt ?? Date.now();
@@ -290,13 +294,14 @@ class QuotaPersistenceMiddleware {
           changed = true;
         });
         cached.forEach((entry, fileName) => {
-          if (!this.isCacheEntryCompatible(provider, entry.data)) {
+          const data = normalizePersistedQuotaState(provider, entry.data, entry.cachedAt);
+          if (!this.isCacheEntryCompatible(provider, data)) {
             void sqliteQuotaCache.delete(provider, fileName);
             return;
           }
-          this.syncedVersions.set(`${provider}:${fileName}`, this.getSyncVersion(entry.data));
-          if (next[fileName] === entry.data) return;
-          next[fileName] = entry.data;
+          this.syncedVersions.set(`${provider}:${fileName}`, this.getSyncVersion(data));
+          if (next[fileName] === data) return;
+          next[fileName] = data;
           changed = true;
         });
         return changed ? next : prev;

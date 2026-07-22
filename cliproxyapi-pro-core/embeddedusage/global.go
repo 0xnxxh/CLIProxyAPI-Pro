@@ -235,6 +235,15 @@ func SetQuotaCache(ctx context.Context, entry QuotaCacheEntry) error {
 	return globalService.store.SetQuotaCache(ctx, entry)
 }
 
+func GetQuotaCache(ctx context.Context, provider, fileName string) ([]QuotaCacheEntry, error) {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+	if globalService == nil || globalService.store == nil {
+		return nil, fmt.Errorf("usage service is not available")
+	}
+	return globalService.store.GetQuotaCache(ctx, provider, fileName)
+}
+
 func QueueRoutingCursorState(state RoutingCursorState) {
 	state.CursorKey = strings.TrimSpace(state.CursorKey)
 	state.LastAuthID = strings.TrimSpace(state.LastAuthID)

@@ -2,6 +2,7 @@ import React from 'react';
 import type { ReactNode } from 'react';
 import type { TFunction } from 'i18next';
 import type {
+  ApiError,
   AuthFileItem,
   GeminiCliCodeAssistPayload,
   GeminiCliCredits,
@@ -13,6 +14,7 @@ import type {
   GeminiCliUserTier,
 } from '@/types';
 import { apiCallApi, getApiCallErrorMessage } from '@/services/api';
+import { apiClient } from '@/services/api/client';
 import { useQuotaStore } from '@/stores';
 import {
   createStatusError,
@@ -61,6 +63,7 @@ type GeminiCliQuotaData = {
   tierLabel: string | null;
   tierId: string | null;
   creditBalance: number | null;
+  pluginSnapshot: boolean;
 };
 
 type GeminiCliQuotaGroupDefinition = {
@@ -68,6 +71,32 @@ type GeminiCliQuotaGroupDefinition = {
   label: string;
   preferredModelId?: string;
   modelIds: string[];
+};
+
+type PluginQuotaItem = {
+  id: string;
+  label: string;
+  remaining_fraction?: number;
+  remaining_amount?: number;
+  reset_at?: string;
+  model_ids?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+type PluginQuotaSnapshot = {
+  schema_version: number;
+  observed_at_ms: number;
+  items: PluginQuotaItem[];
+  plan?: {
+    id?: string;
+    label?: string;
+    credit_balance?: number;
+  };
+  metadata?: Record<string, unknown>;
+};
+
+type PluginQuotaFetchResponse = {
+  snapshot?: PluginQuotaSnapshot;
 };
 
 const GEMINI_CLI_QUOTA_GROUPS: GeminiCliQuotaGroupDefinition[] = [
@@ -396,6 +425,7 @@ const scheduleGeminiCliSupplementaryRefresh = (
           tierLabel: supplementary.tierLabel,
           tierId: supplementary.tierId,
           creditBalance: supplementary.creditBalance,
+          cachedAt: Date.now(),
         },
       };
     });
@@ -411,6 +441,41 @@ const fetchGeminiCliQuota = async (
   const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex);
   if (!authIndex) {
     throw new Error(t('gemini_cli_quota.missing_auth_index'));
+  }
+
+  try {
+    const response = await apiClient.post<PluginQuotaFetchResponse>('/quota/fetch', {
+      auth_index: authIndex,
+    });
+    const snapshot = response.snapshot;
+    if (!snapshot || !Array.isArray(snapshot.items) || snapshot.items.length === 0) {
+      throw new Error(t('gemini_cli_quota.empty_buckets'));
+    }
+    const buckets: GeminiCliQuotaBucketState[] = snapshot.items.map((item) => ({
+      id: item.id,
+      label: item.label,
+      remainingFraction: normalizeQuotaFraction(item.remaining_fraction),
+      remainingAmount: normalizeNumberValue(item.remaining_amount),
+      resetTime: normalizeStringValue(item.reset_at) ?? undefined,
+      tokenType: normalizeStringValue(item.metadata?.token_type),
+      modelIds: Array.isArray(item.model_ids) ? item.model_ids : [],
+    }));
+    const tierId = normalizeStringValue(snapshot.plan?.id);
+    const tierLabel = normalizeStringValue(snapshot.plan?.label) ?? tierId;
+    return {
+      fileName: file.name,
+      supplementaryRequestId: 0,
+      buckets,
+      projectId:
+        normalizeStringValue(snapshot.metadata?.project_id) ?? resolveGeminiCliProjectId(file) ?? '',
+      tierLabel,
+      tierId,
+      creditBalance: normalizeNumberValue(snapshot.plan?.credit_balance),
+      pluginSnapshot: true,
+    };
+  } catch (error) {
+    if ((error as ApiError).status !== 404) throw error;
+    // Backward compatibility for management clients connected to a core without /quota/fetch.
   }
 
   const projectId = resolveGeminiCliProjectId(file);
@@ -469,6 +534,7 @@ const fetchGeminiCliQuota = async (
     supplementaryRequestId,
     buckets,
     projectId,
+    pluginSnapshot: false,
     ...supplementary,
   };
 };
@@ -636,6 +702,7 @@ export const GEMINI_CLI_CONFIG = {
       tierLabel: supplementary.tierLabel ?? data.tierLabel,
       tierId: supplementary.tierId ?? data.tierId,
       creditBalance: supplementary.creditBalance ?? data.creditBalance,
+      quotaProviderSnapshot: data.pluginSnapshot || undefined,
       cachedAt: Date.now(),
     };
   },
