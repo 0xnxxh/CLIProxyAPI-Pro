@@ -19,7 +19,7 @@ QUOTA_LOCALE_KEYS = {
         'days_ago': '{{count}} day ago',
         'days_ago_plural': '{{count}} days ago',
         'search_label': 'Search quota credentials',
-        'search_placeholder': 'Search config name, type, provider, note, or plan. Use * as a wildcard',
+        'search_placeholder': 'Search config name, auth_index, type, provider, note, or plan. Use * as a wildcard',
         'no_search_results': 'No matching quota credentials',
         'no_search_results_desc': 'No quota credential matches the current search.',
     },
@@ -33,7 +33,7 @@ QUOTA_LOCALE_KEYS = {
         'days_ago': '{{count}} день назад',
         'days_ago_plural': '{{count}} дней назад',
         'search_label': 'Поиск конфигураций квот',
-        'search_placeholder': 'Поиск по имени, типу, провайдеру, заметке или тарифу; поддерживается *',
+        'search_placeholder': 'Поиск по имени, auth_index, типу, провайдеру, заметке или тарифу; поддерживается *',
         'no_search_results': 'Подходящие конфигурации квот не найдены',
         'no_search_results_desc': 'Текущему запросу не соответствует ни одна конфигурация квот.',
     },
@@ -44,7 +44,7 @@ QUOTA_LOCALE_KEYS = {
         'hours_ago': '{{count}} 小时前',
         'days_ago': '{{count}} 天前',
         'search_label': '搜索配额配置文件',
-        'search_placeholder': '搜索配置文件名称、类型、提供商、备注或套餐，支持 * 通配',
+        'search_placeholder': '搜索配置文件名称、auth_index、类型、提供商、备注或套餐，支持 * 通配',
         'no_search_results': '没有匹配的配额配置文件',
         'no_search_results_desc': '当前搜索条件下没有可显示的配额配置文件。',
     },
@@ -55,7 +55,7 @@ QUOTA_LOCALE_KEYS = {
         'hours_ago': '{{count}} 小時前',
         'days_ago': '{{count}} 天前',
         'search_label': '搜尋配額設定檔',
-        'search_placeholder': '搜尋設定檔名稱、類型、供應商、備註或套餐，支援 * 萬用字元',
+        'search_placeholder': '搜尋設定檔名稱、auth_index、類型、供應商、備註或套餐，支援 * 萬用字元',
         'no_search_results': '沒有符合的配額設定檔',
         'no_search_results_desc': '目前搜尋條件下沒有可顯示的配額設定檔。',
     },
@@ -157,10 +157,10 @@ GEMINI_CLI_LOCALE_KEYS = {
 }
 
 AUTH_FILES_SEARCH_PLACEHOLDER_KEYS = {
-    'en.json': 'Filter by name, type, provider, note, or plan. Use * as a wildcard',
-    'ru.json': 'Фильтр по имени, типу, провайдеру, заметке или тарифу, поддерживается wildcard *',
-    'zh-CN.json': '输入名称、类型、提供方、备注或套餐关键字，支持 * 通配',
-    'zh-TW.json': '輸入名稱、類型、供應方、備註或套餐關鍵字，支援 * 萬用字元',
+    'en.json': 'Filter by name, auth_index, type, provider, note, or plan. Use * as a wildcard',
+    'ru.json': 'Фильтр по имени, auth_index, типу, провайдеру, заметке или тарифу, поддерживается wildcard *',
+    'zh-CN.json': '输入名称、auth_index、类型、提供方、备注或套餐关键字，支持 * 通配',
+    'zh-TW.json': '輸入名稱、auth_index、類型、供應方、備註或套餐關鍵字，支援 * 萬用字元',
 }
 
 AUTH_FILES_PLAN_SORT_LABEL_KEYS = {
@@ -844,6 +844,9 @@ def patch_quota_page_search(target: Path) -> None:
         "export function QuotaPage() {\n",
         "const QUOTA_SEARCH_FIELD_KEYS = [\n"
         "  'name',\n"
+        "  'auth_index',\n"
+        "  'authIndex',\n"
+        "  'auth-index',\n"
         "  'type',\n"
         "  'provider',\n"
         "  'note',\n"
@@ -1223,6 +1226,9 @@ def patch_auth_files_page_search(target: Path) -> None:
         "\n"
         "const AUTH_FILE_SEARCH_FIELD_KEYS = [\n"
         "  'name',\n"
+        "  'auth_index',\n"
+        "  'authIndex',\n"
+        "  'auth-index',\n"
         "  'type',\n"
         "  'provider',\n"
         "  'note',\n"
