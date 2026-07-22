@@ -50,10 +50,14 @@ its `Executor.HttpRequest` for:
 - `POST .../v1internal:loadCodeAssist` as the supplementary plan observation
 
 This preserves the plugin's authentication injection, token refresh, proxy path, and request
-fingerprint. Core only owns quota/plan parsing. Gemini model buckets are collapsed into stable Flash Lite, Flash, and Pro groups. Gemini 2.0 Flash
-buckets are ignored. `paidTier` wins when it has an ID; otherwise `currentTier` is used. Tier IDs are
-normalized as follows: `free-tier -> free`, `legacy-tier -> legacy`, `standard-tier -> standard`,
-`g1-pro-tier -> pro`, and `g1-ultra-tier -> ultra`.
+fingerprint. Core only owns quota/plan parsing. Gemini model buckets are collapsed into stable
+Flash Lite, Flash, and Pro groups. Gemini 2.0 Flash buckets are ignored. Tier parsing tolerates the
+response wrappers used by older management bridges. `paidTier` wins when it has an ID; otherwise
+`currentTier` is used, followed by the default entry in `allowedTiers`. A successful response with
+no supported tier is treated as a partial plan failure, so the previous persisted plan is retained
+as stale instead of being erased. Tier IDs are normalized as follows: `free-tier -> free`,
+`legacy-tier -> legacy`, `standard-tier -> standard`, `g1-pro-tier -> pro`, and
+`g1-ultra-tier -> ultra`.
 
 ## Management and persistence
 

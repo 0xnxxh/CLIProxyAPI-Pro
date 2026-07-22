@@ -1568,6 +1568,77 @@ def patch_auth_files_page_sorting(target: Path) -> None:
     )
 
 
+def patch_auth_files_gemini_quota(target: Path) -> None:
+    constants_path = target / 'src/features/authFiles/constants.ts'
+    quota_section_path = target / 'src/features/authFiles/components/AuthFileQuotaSection.tsx'
+    card_path = target / 'src/features/authFiles/components/AuthFileCard.tsx'
+    styles_path = target / 'src/pages/AuthFilesPage.module.scss'
+
+    replace_once(
+        constants_path,
+        "export type QuotaProviderType = 'antigravity' | 'claude' | 'codex' | 'kimi' | 'xai';",
+        "export type QuotaProviderType = 'antigravity' | 'claude' | 'codex' | 'gemini-cli' | 'kimi' | 'xai';",
+    )
+    replace_once(
+        constants_path,
+        "  'codex',\n  'kimi',",
+        "  'codex',\n  'gemini-cli',\n  'kimi',",
+    )
+
+    insert_once(
+        quota_section_path,
+        "} from '@/components/quota';\n",
+        "} from '@/components/quota';\n"
+        "import { GEMINI_CLI_CONFIG } from '@/extensions/quota/geminiCliQuotaConfig';\n",
+        "GEMINI_CLI_CONFIG } from '@/extensions/quota/geminiCliQuotaConfig'",
+    )
+    replace_once(
+        quota_section_path,
+        "  if (type === 'codex') return CODEX_CONFIG;\n  if (type === 'kimi') return KIMI_CONFIG;",
+        "  if (type === 'codex') return CODEX_CONFIG;\n"
+        "  if (type === 'gemini-cli') return GEMINI_CLI_CONFIG;\n"
+        "  if (type === 'kimi') return KIMI_CONFIG;",
+    )
+    replace_once(
+        quota_section_path,
+        "    if (quotaType === 'codex') return state.codexQuota[file.name] as QuotaState;\n"
+        "    if (quotaType === 'kimi') return state.kimiQuota[file.name] as QuotaState;",
+        "    if (quotaType === 'codex') return state.codexQuota[file.name] as QuotaState;\n"
+        "    if (quotaType === 'gemini-cli') return state.geminiCliQuota[file.name] as QuotaState;\n"
+        "    if (quotaType === 'kimi') return state.kimiQuota[file.name] as QuotaState;",
+    )
+    replace_once(
+        quota_section_path,
+        "    if (quotaType === 'codex') return state.setCodexQuota as unknown as (updater: unknown) => void;\n"
+        "    if (quotaType === 'kimi') return state.setKimiQuota as unknown as (updater: unknown) => void;",
+        "    if (quotaType === 'codex') return state.setCodexQuota as unknown as (updater: unknown) => void;\n"
+        "    if (quotaType === 'gemini-cli')\n"
+        "      return state.setGeminiCliQuota as unknown as (updater: unknown) => void;\n"
+        "    if (quotaType === 'kimi') return state.setKimiQuota as unknown as (updater: unknown) => void;",
+    )
+
+    replace_once(
+        card_path,
+        "        : quotaType === 'codex'\n"
+        "          ? styles.codexCard\n"
+        "          : quotaType === 'kimi'",
+        "        : quotaType === 'codex'\n"
+        "          ? styles.codexCard\n"
+        "          : quotaType === 'gemini-cli'\n"
+        "            ? styles.geminiCliCard\n"
+        "            : quotaType === 'kimi'",
+    )
+    insert_once(
+        styles_path,
+        ".kimiCard {\n",
+        ".geminiCliCard {\n"
+        "  background-image: linear-gradient(180deg, rgba(224, 232, 255, 0.08), transparent);\n"
+        "}\n\n"
+        ".kimiCard {\n",
+        '.geminiCliCard {',
+    )
+
+
 def patch_auth_files_runtime_state(target: Path) -> None:
     type_path = target / 'src/types/authFile.ts'
     card_path = target / 'src/features/authFiles/components/AuthFileCard.tsx'
@@ -2113,6 +2184,7 @@ def main() -> None:
     patch_account_inspection_page(target)
     patch_auth_files_page_search(target)
     patch_auth_files_page_sorting(target)
+    patch_auth_files_gemini_quota(target)
     patch_auth_files_runtime_state(target)
     patch_runtime_detection(target)
     patch_supporting_api_and_types(target)

@@ -85,6 +85,10 @@ func (h *Host) fetchLegacyGeminiCLIQuota(ctx context.Context, auth *coreauth.Aut
 		return response, nil
 	}
 	response.Snapshot.Plan = legacyGeminiCLIQuotaPlan(planPayload, observedAt)
+	if response.Snapshot.Plan == nil {
+		response.PlanUnavailable = true
+		response.PlanError = "load code assist returned no supported tier"
+	}
 	return response, nil
 }
 
@@ -252,18 +256,22 @@ func legacyGeminiCLIParseBuckets(value any) []legacyGeminiCLIBucket {
 		}
 		out = append(out, legacyGeminiCLIBucket{
 			modelID: modelID, tokenType: legacyGeminiCLIFirstString(row, "tokenType", "token_type"),
-			resetAt: legacyGeminiCLIFirstString(row, "resetTime", "reset_time"),
+			resetAt:           legacyGeminiCLIFirstString(row, "resetTime", "reset_time"),
 			remainingFraction: legacyGeminiCLIFirstNumber(row, "remainingFraction", "remaining_fraction"),
-			remainingAmount: legacyGeminiCLIFirstNumber(row, "remainingAmount", "remaining_amount"),
+			remainingAmount:   legacyGeminiCLIFirstNumber(row, "remainingAmount", "remaining_amount"),
 		})
 	}
 	return out
 }
 
 func legacyGeminiCLIQuotaPlan(payload map[string]any, observedAt int64) *pluginapi.QuotaPlan {
+	payload = legacyGeminiCLIUnwrapPayload(payload)
 	tier := legacyGeminiCLIFirstRecord(payload, "paidTier", "paid_tier")
 	if strings.TrimSpace(legacyGeminiCLIString(tier["id"])) == "" {
 		tier = legacyGeminiCLIFirstRecord(payload, "currentTier", "current_tier")
+	}
+	if strings.TrimSpace(legacyGeminiCLIString(tier["id"])) == "" {
+		tier = legacyGeminiCLIDefaultAllowedTier(payload)
 	}
 	if tier == nil {
 		return nil
@@ -284,6 +292,56 @@ func legacyGeminiCLIQuotaPlan(payload map[string]any, observedAt int64) *plugina
 		}
 	}
 	return plan
+}
+
+func legacyGeminiCLIUnwrapPayload(payload map[string]any) map[string]any {
+	if unwrapped := legacyGeminiCLIFindTierPayload(payload); unwrapped != nil {
+		return unwrapped
+	}
+	return payload
+}
+
+func legacyGeminiCLIFindTierPayload(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	for _, keys := range [][]string{{"paidTier", "paid_tier"}, {"currentTier", "current_tier"}} {
+		tier := legacyGeminiCLIFirstRecord(payload, keys...)
+		if strings.TrimSpace(legacyGeminiCLIString(tier["id"])) != "" {
+			return payload
+		}
+	}
+	if legacyGeminiCLIDefaultAllowedTier(payload) != nil {
+		return payload
+	}
+	for _, key := range []string{"body", "bodyText", "data", "response", "result"} {
+		switch nested := payload[key].(type) {
+		case map[string]any:
+			if unwrapped := legacyGeminiCLIFindTierPayload(nested); unwrapped != nil {
+				return unwrapped
+			}
+		case string:
+			var decoded map[string]any
+			if json.Unmarshal([]byte(strings.TrimSpace(nested)), &decoded) == nil {
+				if unwrapped := legacyGeminiCLIFindTierPayload(decoded); unwrapped != nil {
+					return unwrapped
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func legacyGeminiCLIDefaultAllowedTier(payload map[string]any) map[string]any {
+	tiers, _ := legacyGeminiCLIFirstValue(payload, "allowedTiers", "allowed_tiers").([]any)
+	for _, value := range tiers {
+		tier, _ := value.(map[string]any)
+		isDefault, _ := legacyGeminiCLIFirstValue(tier, "isDefault", "is_default").(bool)
+		if isDefault && strings.TrimSpace(legacyGeminiCLIString(tier["id"])) != "" {
+			return tier
+		}
+	}
+	return nil
 }
 
 func legacyGeminiCLIPlanKind(id string) string {
