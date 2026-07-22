@@ -1,5 +1,61 @@
+import type { QuotaCacheEntry } from './sqliteQuotaCache';
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const isNormalizedGeminiQuotaSnapshot = (data: unknown): boolean =>
+  isRecord(data) && data.status === undefined && Array.isArray(data.items);
+
+const quotaCacheFreshness = (entry: QuotaCacheEntry): number[] => [
+  entry.observedAt || 0,
+  entry.cachedAt || 0,
+  entry.storedAt || 0,
+  entry.revision || 0,
+];
+
+const isFresherQuotaCacheEntry = (
+  candidate: QuotaCacheEntry,
+  current: QuotaCacheEntry
+): boolean => {
+  const candidateFreshness = quotaCacheFreshness(candidate);
+  const currentFreshness = quotaCacheFreshness(current);
+  for (let index = 0; index < candidateFreshness.length; index += 1) {
+    if (candidateFreshness[index] === currentFreshness[index]) continue;
+    return candidateFreshness[index] > currentFreshness[index];
+  }
+  return false;
+};
+
+export const selectPreferredQuotaCacheEntries = (
+  provider: string,
+  entries: QuotaCacheEntry[]
+): Map<string, QuotaCacheEntry> => {
+  const selected = new Map<string, QuotaCacheEntry>();
+
+  entries.forEach((entry) => {
+    const current = selected.get(entry.fileName);
+    if (!current) {
+      selected.set(entry.fileName, entry);
+      return;
+    }
+
+    if (provider === 'gemini-cli') {
+      // Core-owned snapshots are authoritative over the legacy UI mirror for the same auth file.
+      const candidateIsSnapshot = isNormalizedGeminiQuotaSnapshot(entry.data);
+      const currentIsSnapshot = isNormalizedGeminiQuotaSnapshot(current.data);
+      if (candidateIsSnapshot !== currentIsSnapshot) {
+        if (candidateIsSnapshot) selected.set(entry.fileName, entry);
+        return;
+      }
+    }
+
+    if (isFresherQuotaCacheEntry(entry, current)) {
+      selected.set(entry.fileName, entry);
+    }
+  });
+
+  return selected;
+};
 
 export const normalizePersistedQuotaState = (
   provider: string,

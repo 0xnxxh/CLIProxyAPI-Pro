@@ -13,7 +13,10 @@ import {
   type QuotaProviderType,
 } from '@/utils/quota';
 import { sqliteQuotaCache, type QuotaCacheEntry } from './sqliteQuotaCache';
-import { normalizePersistedQuotaState } from './normalizedQuotaSnapshot';
+import {
+  normalizePersistedQuotaState,
+  selectPreferredQuotaCacheEntries,
+} from './normalizedQuotaSnapshot';
 
 interface QuotaStatusState {
   status: 'idle' | 'loading' | 'success' | 'error';
@@ -276,7 +279,7 @@ class QuotaPersistenceMiddleware {
    * Preload single provider from SQLite quota cache
    */
   private preloadProvider(provider: QuotaProviderType, cachedEntries: QuotaCacheEntry[]) {
-    const cached = new Map(cachedEntries.map((entry) => [entry.fileName, entry]));
+    const cached = selectPreferredQuotaCacheEntries(provider, cachedEntries);
     const previouslyHydrated = this.hydratedKeys.get(provider) ?? new Set<string>();
 
     const setterName = getQuotaProviderSetterName(provider);
