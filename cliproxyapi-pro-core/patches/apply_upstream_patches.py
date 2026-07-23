@@ -1446,12 +1446,19 @@ replace_once(
     '\t\tRequestID:           requestID,\n\t\tStream:              stream,\n\t\tReasoningEffort:',
     'Stream:              stream',
 )
-replace_once(
-    redisqueue_plugin,
-    '\tRequestID           string `json:"request_id"`\n\tReasoningEffort',
-    '\tRequestID           string `json:"request_id"`\n\tStream              bool   `json:"stream"`\n\tReasoningEffort',
-    'Stream              bool   `json:"stream"`',
-)
+redisqueue_plugin_text = read(redisqueue_plugin)
+stream_field = '\tStream bool `json:"stream"`\n'
+if '`json:"stream"`' not in redisqueue_plugin_text:
+    request_id_field = re.compile(r'(?m)^\tRequestID[ \t]+string[ \t]+`json:"request_id"`\n')
+    matches = request_id_field.findall(redisqueue_plugin_text)
+    if len(matches) != 1:
+        raise SystemExit(
+            f'expected one request ID field in {redisqueue_plugin}, found {len(matches)}'
+        )
+    write(
+        redisqueue_plugin,
+        request_id_field.sub(lambda match: match.group(0) + stream_field, redisqueue_plugin_text, count=1),
+    )
 redisqueue_plugin_test = ROOT / 'internal/redisqueue/plugin_test.go'
 if redisqueue_plugin_test.exists():
     text = read_text(redisqueue_plugin_test)
