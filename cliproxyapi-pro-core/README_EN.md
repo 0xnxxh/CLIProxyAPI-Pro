@@ -52,7 +52,7 @@ The embedded service exposes these management routes:
 - `DELETE /v0/management/usage/quota-cache` — delete quota cache entries.
 - `GET /v0/management/usage/model-prices` — read model price settings.
 - `PUT /v0/management/usage/model-prices` — write model price settings.
-- `GET|PUT|DELETE /v0/management/usage/model-price-rules` — manage provider/model rules and context tiers.
+- `GET|PUT|DELETE /v0/management/usage/model-price-rules` — manage globally applied per-model rules and context tiers.
 - `POST /v0/management/usage/model-prices/sync` — synchronize observed models from models.dev.
 - `GET /v0/management/usage/model-prices/sync-status` — read synchronization status.
 - `POST /v0/management/usage/model-prices/recalculate` — explicitly recalculate historical costs.
@@ -71,7 +71,7 @@ Historical `/usage/events` paging accepts `from_ms`, `to_ms`, `provider`, `model
 
 The export contains usage events and may also include metadata records:
 
-- `model_prices` — legacy base prices plus complete provider/model pricing rules.
+- `model_prices` — legacy base prices plus complete global per-model pricing rules.
 - `quota_cache` — SQLite-backed quota snapshots used by quota cards and account-scoped refresh.
 - `monitoring_settings` — retention, WebDAV backup, and scheduled models.dev synchronization settings.
 - `routing_cursor_state` — account-routing rotation cursors.
@@ -91,8 +91,13 @@ Example import response fields:
   "failed": 0,
   "modelPrices": 12,
   "modelPriceRecords": 1,
+  "modelPriceRules": 12,
   "quotaCache": 8,
   "quotaCacheRecords": 1,
+  "routingCursors": 4,
+  "routingCursorRecords": 1,
+  "authRuntimeStats": 8,
+  "authRuntimeStatsRecords": 1,
   "accountInspectionSchedule": true,
   "accountInspectionScheduleRecords": 1,
   "accountInspectionSnapshot": true,
@@ -112,6 +117,7 @@ The embedded service stores quota snapshots in SQLite for these providers:
 - Codex
 - Gemini CLI
 - Kimi
+- xAI
 
 The management UI reads and writes this cache through `/usage/quota-cache`, so quota cards can be restored after page refreshes, browser changes, and backend restarts.
 
@@ -133,8 +139,10 @@ Request monitoring also stores TTFT, HTTP status code, structured error, reasoni
 - `GET /v0/management/account-inspection/schedule`
 - `GET /v0/management/account-inspection/status`
 - `GET /v0/management/account-inspection/logs` (WebSocket/WSS log and status stream)
-- `PUT /v0/management/account-inspection/schedule`
+- `PUT|PATCH /v0/management/account-inspection/schedule`
 - `POST /v0/management/account-inspection/run`
+- `POST /v0/management/account-inspection/inspect-one`
+- `POST /v0/management/account-inspection/refresh-token`
 - `POST /v0/management/account-inspection/pause`
 - `POST /v0/management/account-inspection/resume`
 - `POST /v0/management/account-inspection/stop`
@@ -145,9 +153,11 @@ The scheduler can inspect accounts for:
 - Antigravity
 - Claude
 - Codex
+- Gemini CLI
 - Kimi
+- xAI
 
-It supports provider filtering, worker limits, retry/timeout settings, sampling, usage-threshold decisions, progress/status/log/result snapshots, pause/resume/stop controls, manual actions, and optional automatic actions for quota exhaustion, quota recovery, and account errors.
+It supports provider filtering, worker limits, retry/timeout settings, sampling, usage-threshold decisions, progress/status/log/result snapshots, pause/resume/stop controls, manual actions, and optional automatic actions for quota exhaustion, quota recovery, and account errors. Antigravity and xAI also support optional deep probes.
 
 Before probing an account, the scheduler can refresh its auth record when it is already in the normal upstream refresh window. This inspection refresh path reuses upstream provider refresh logic and persistence, allows disabled accounts, skips API-key accounts, skips accounts not yet due, and respects `NextRefreshAfter`. If refresh succeeds, probing uses the refreshed auth; if refresh fails, the scheduler keeps the account and skips probing it for that run.
 
@@ -160,6 +170,20 @@ The schedule file defaults to:
 Override it with `ACCOUNT_INSPECTION_SCHEDULE_PATH` if needed.
 
 The latest finished inspection result is persisted separately at `/CLIProxyAPI/usage/account-inspection-snapshot.json` with mode `0600`. A snapshot restored after process restart or usage import is read-only and is replaced when the next full inspection finishes. Override its path with `ACCOUNT_INSPECTION_SNAPSHOT_PATH` if needed.
+
+### Routing policy and request-state protection
+
+The patch layer exposes a unified routing-policy API under the management prefix:
+
+- `GET /v0/management/routing-policy`
+- `PUT|PATCH /v0/management/routing-policy`
+- `POST /v0/management/routing-policy/release`
+
+The API combines upstream routing mode, session stickiness, request retry, account switching, cooldown, quota fallback, and Codex identity-cloaking settings with Pro's `routing.request-protection` policy. Built-in protection supports Antigravity, xAI, Codex, Gemini CLI, Gemini, Gemini Interactions, Vertex AI, AI Studio, Claude, and Kimi.
+
+Protection is disabled by default and starts in `observe` mode. Per-provider settings cover HTTP statuses, consecutive-confirmation thresholds, confirmation windows, 429 quota evidence, automatic release, and fallback disable duration. `enforce` can disable matching auth records and records `request_protection` ownership; automatic or manual release affects only records owned by this policy, never user-disabled or differently owned accounts.
+
+Release time prefers `Retry-After`, Codex reset headers, and response-body `resets_at` / `resets_in_seconds`, then falls back to the configured provider duration. Runtime status includes currently protected accounts and recent in-process events.
 
 ### Root redirect and health response
 
@@ -190,11 +214,15 @@ It then starts `CLIProxyAPI` and optionally restores the latest usage backup fro
 ## Repository layout
 
 - `Dockerfile` — downloads upstream CLIProxyAPI, applies this customization layer, and builds the final image.
+- `Dockerfile.runtime` — assembles the Actions runtime image from prebuilt Linux binaries.
+- `QUOTA_PROVIDER.md` — QuotaProvider plugin protocol and compatibility rules.
 - `entrypoint.sh` — starts Komari, starts the main API, and restores WebDAV usage backups.
 - `embeddedusage/` — embedded SQLite usage service and management routes.
 - `patches/apply_upstream_patches.py` — patches upstream source during Docker build.
 - `patches/account_inspection_scheduler.go` — backend account-inspection scheduler injected into upstream management handlers.
 - The generated API Server shuts down its management Handler from `Stop`; embedders that create a Handler directly through the SDK must also call `Shutdown()` to release inspection, routing-protection, login-cleanup, and global callback ownership.
+- `patches/routing_policy.go` — unified routing configuration, request-state-protection handlers, usage plugin, and automatic release task.
+- `patches/routing_protection_config.go` — injected `routing.request-protection` configuration types.
 - `.github/workflows/release-core.yml` — image publish, Pro binary assets, `management.html` publish, usage backup, Render deployment trigger, Telegram notification, and run cleanup.
 
 ## Docker build
@@ -215,9 +243,9 @@ Build a specific upstream release while writing the Pro runtime version:
 
 ```bash
 docker build \
-  --build-arg CLIPROXY_VERSION=v7.1.18 \
-  --build-arg CLIPROXY_BUILD_VERSION=v7.1.18-pro \
-  -t cliproxyapi-pro:v7.1.18-pro \
+  --build-arg CLIPROXY_VERSION=vX.Y.Z \
+  --build-arg CLIPROXY_BUILD_VERSION=vX.Y.Z-pro \
+  -t cliproxyapi-pro:vX.Y.Z-pro \
   ./cliproxyapi-pro-core
 ```
 
@@ -289,10 +317,10 @@ Workflow:
 
 The workflow:
 
-1. Checks the latest upstream CLIProxyAPI release and computes the Pro release tag, for example `v7.1.18-pro`.
+1. Checks the latest upstream CLIProxyAPI release and computes the Pro release tag, for example `v<core-version>-pro`.
 2. Checks the latest upstream management release.
-3. Builds and pushes `linux/amd64` and `linux/arm64` Docker images tagged with `latest` and the Pro release tag.
-4. Builds Pro binary assets with the same platform matrix and archive formats as upstream, with the `CLIProxyAPI` asset prefix; default desktop/Linux archives enable CGO for dynamic-library plugin support, while `_no-plugin` archives remain CGO-free portable builds.
+3. Builds Pro binary assets with the same platform matrix and archive formats as upstream, with the `CLIProxyAPI` asset prefix; default desktop/Linux archives enable CGO for dynamic-library plugin support, while `_no-plugin` archives remain CGO-free portable builds.
+4. Reuses the Linux amd64/arm64 assets to assemble and push a multi-architecture image through `Dockerfile.runtime`, tagged with `latest` and the Pro release tag.
 5. Applies the management customization layer and builds `management.html`.
 6. Creates or updates the current repository GitHub Release, then uploads binary assets, `checksums.txt`, and `management.html`.
 7. Writes core upstream and management upstream version mappings plus release notes into the GitHub Release notes.
@@ -365,16 +393,13 @@ Example:
 
 ## Local validation
 
-Validate the embedded usage package against an upstream checkout:
+Validate a clean upstream checkout with the repository script. It checks guarded-source preflight, rejected reapplication, the relevant Go packages, and the server build:
 
 ```bash
-cp -R /path/to/CLIProxyAPI /tmp/cliproxy-check
-SRC_ROOT=/tmp/cliproxy-check python3 cliproxyapi-pro-core/patches/apply_upstream_patches.py
-go -C /tmp/cliproxy-check mod tidy
-go -C /tmp/cliproxy-check test ./internal/embeddedusage/...
+bash scripts/validation/core.sh /path/to/clean/CLIProxyAPI
 ```
 
-Validate entrypoint syntax:
+Validate only entrypoint syntax:
 
 ```bash
 sh -n cliproxyapi-pro-core/entrypoint.sh

@@ -2,6 +2,8 @@
 
 Quota runtime state is persisted by the backend embedded-usage SQLite store. The browser Zustand store is only an in-memory view of that state.
 
+Supported provider maps are Antigravity, Claude, Codex, Gemini CLI, Kimi, and xAI.
+
 ## Flow
 
 1. Provider quota fetchers write successful states to the Zustand quota maps with `cachedAt`.
@@ -11,5 +13,7 @@ Quota runtime state is persisted by the backend embedded-usage SQLite store. The
 5. Failed writes stay queued and retry with bounded exponential backoff.
 
 Account inspection writes directly to the same SQLite cache. Authentication JSON files are not used as a quota-cache store.
+
+For Gemini CLI, normalized Core QuotaProvider snapshots are authoritative. The middleware hydrates those snapshots into the UI shape and does not mirror the same normalized snapshot back as a second legacy cache entry.
 
 The cache is included in the usage JSONL export/import format. Imported older revisions do not overwrite newer records.

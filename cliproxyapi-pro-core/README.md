@@ -52,7 +52,7 @@ internal/embeddedusage
 - `DELETE /v0/management/usage/quota-cache` — 删除配额缓存。
 - `GET /v0/management/usage/model-prices` — 读取模型价格设置。
 - `PUT /v0/management/usage/model-prices` — 写入模型价格设置。
-- `GET|PUT|DELETE /v0/management/usage/model-price-rules` — 管理 provider/model 价格规则和上下文阶梯。
+- `GET|PUT|DELETE /v0/management/usage/model-price-rules` — 管理按 model 全局生效的价格规则和上下文阶梯。
 - `POST /v0/management/usage/model-prices/sync` — 从 models.dev 同步请求历史中出现过的模型。
 - `GET /v0/management/usage/model-prices/sync-status` — 读取同步状态。
 - `POST /v0/management/usage/model-prices/recalculate` — 显式重新估算历史成本。
@@ -71,7 +71,7 @@ internal/embeddedusage
 
 导出内容包含 usage events，也可能包含元数据记录：
 
-- `model_prices` — 基础价格兼容数据和完整 provider/model 价格规则。
+- `model_prices` — 基础价格兼容数据和完整的全局 model 价格规则。
 - `quota_cache` — 配额卡片和账号级刷新使用的 SQLite-backed quota snapshots。
 - `monitoring_settings` — 监控日志保留时间、WebDAV 备份配置和 models.dev 定期同步配置。
 - `routing_cursor_state` — 账号路由轮转游标。
@@ -91,8 +91,13 @@ internal/embeddedusage
   "failed": 0,
   "modelPrices": 12,
   "modelPriceRecords": 1,
+  "modelPriceRules": 12,
   "quotaCache": 8,
   "quotaCacheRecords": 1,
+  "routingCursors": 4,
+  "routingCursorRecords": 1,
+  "authRuntimeStats": 8,
+  "authRuntimeStatsRecords": 1,
   "accountInspectionSchedule": true,
   "accountInspectionScheduleRecords": 1,
   "accountInspectionSnapshot": true,
@@ -112,6 +117,7 @@ internal/embeddedusage
 - Codex
 - Gemini CLI
 - Kimi
+- xAI
 
 管理页面通过 `/usage/quota-cache` 读写该缓存，因此配额卡片可在页面刷新、浏览器切换和后端重启后恢复。
 
@@ -132,8 +138,10 @@ internal/embeddedusage
 - `GET /v0/management/account-inspection/schedule`
 - `GET /v0/management/account-inspection/status`
 - `GET /v0/management/account-inspection/logs`（WebSocket/WSS 日志和状态流）
-- `PUT /v0/management/account-inspection/schedule`
+- `PUT|PATCH /v0/management/account-inspection/schedule`
 - `POST /v0/management/account-inspection/run`
+- `POST /v0/management/account-inspection/inspect-one`
+- `POST /v0/management/account-inspection/refresh-token`
 - `POST /v0/management/account-inspection/pause`
 - `POST /v0/management/account-inspection/resume`
 - `POST /v0/management/account-inspection/stop`
@@ -144,9 +152,11 @@ internal/embeddedusage
 - Antigravity
 - Claude
 - Codex
+- Gemini CLI
 - Kimi
+- xAI
 
-能力包括 provider 过滤、worker 数量限制、重试/超时、抽样、按用量阈值判断、进度/状态/日志/结果快照、暂停/继续/停止控制、手动操作，以及对额度耗尽、额度恢复、账号错误的可选自动操作。
+能力包括 provider 过滤、worker 数量限制、重试/超时、抽样、按用量阈值判断、进度/状态/日志/结果快照、暂停/继续/停止控制、手动操作，以及对额度耗尽、额度恢复、账号错误的可选自动操作。Antigravity 和 xAI 还支持可选深度探测。
 
 探测账号前，调度器会在认证记录本来已经进入 upstream 正常刷新窗口时尝试刷新 auth。巡检刷新路径复用 upstream provider 刷新逻辑和持久化逻辑，允许 disabled 账号，跳过 API key 账号、未到刷新窗口的账号，并遵守 `NextRefreshAfter`。刷新成功后使用刷新后的 auth 探测；刷新失败时保留账号，并跳过该账号本次探测。
 
@@ -203,6 +213,8 @@ https://github.com/ssfun/CLIProxyAPI-Pro
 ## 目录结构
 
 - `Dockerfile` — 下载 upstream CLIProxyAPI，应用定制层，并构建最终镜像。
+- `Dockerfile.runtime` — GitHub Actions 使用预构建 Linux 二进制组装运行时镜像。
+- `QUOTA_PROVIDER.md` — QuotaProvider 插件协议和兼容策略。
 - `entrypoint.sh` — 启动 Komari、主 API 和 WebDAV usage 恢复逻辑。
 - `embeddedusage/` — 内嵌 SQLite usage service 和 management routes。
 - `patches/apply_upstream_patches.py` — Docker build 阶段 patch upstream 源码。
@@ -230,9 +242,9 @@ docker build -t cliproxyapi-pro ./cliproxyapi-pro-core
 
 ```bash
 docker build \
-  --build-arg CLIPROXY_VERSION=v7.1.18 \
-  --build-arg CLIPROXY_BUILD_VERSION=v7.1.18-pro \
-  -t cliproxyapi-pro:v7.1.18-pro \
+  --build-arg CLIPROXY_VERSION=vX.Y.Z \
+  --build-arg CLIPROXY_BUILD_VERSION=vX.Y.Z-pro \
+  -t cliproxyapi-pro:vX.Y.Z-pro \
   ./cliproxyapi-pro-core
 ```
 
@@ -304,10 +316,10 @@ Workflow：
 
 流程：
 
-1. 检查 upstream CLIProxyAPI 最新 release，并计算当前 Pro release tag，例如 `v7.1.18-pro`。
+1. 检查 upstream CLIProxyAPI 最新 release，并计算当前 Pro release tag，例如 `v<core-version>-pro`。
 2. 检查 upstream management 最新 release。
-3. 构建并推送 `linux/amd64` 和 `linux/arm64` Docker 镜像，tag 包括 `latest` 和 Pro release tag。
-4. 构建与 upstream 平台和压缩格式一致的 Pro 二进制资产，资产名前缀保持为 `CLIProxyAPI`；默认桌面/Linux 包启用 CGO 以支持动态库插件，`_no-plugin` 包保留 CGO-free 静态便携构建。
+3. 构建与 upstream 平台和压缩格式一致的 Pro 二进制资产，资产名前缀保持为 `CLIProxyAPI`；默认桌面/Linux 包启用 CGO 以支持动态库插件，`_no-plugin` 包保留 CGO-free 静态便携构建。
+4. 复用 Linux amd64/arm64 二进制资产，通过 `Dockerfile.runtime` 组装并推送带 `latest` 和 Pro release tag 的多架构镜像。
 5. 应用 management 定制层并构建 `management.html`。
 6. 创建或更新当前仓库 GitHub Release，上传二进制资产、`checksums.txt` 和 `management.html`。
 7. Release notes 写入 core upstream 与 management upstream 的版本映射和 release notes。
@@ -380,16 +392,13 @@ CLIPROXY_RENDER_DEPLOY_HOOKS
 
 ## 本地验证
 
-在 upstream checkout 中验证 embedded usage 包：
+使用仓库验证脚本检查干净的 upstream checkout。脚本会验证 source hash 预检、拒绝重复应用、相关 Go packages 和 server build：
 
 ```bash
-cp -R /path/to/CLIProxyAPI /tmp/cliproxy-check
-SRC_ROOT=/tmp/cliproxy-check python3 cliproxyapi-pro-core/patches/apply_upstream_patches.py
-go -C /tmp/cliproxy-check mod tidy
-go -C /tmp/cliproxy-check test ./internal/embeddedusage/...
+bash scripts/validation/core.sh /path/to/clean/CLIProxyAPI
 ```
 
-验证 entrypoint 语法：
+仅验证 entrypoint 语法：
 
 ```bash
 sh -n cliproxyapi-pro-core/entrypoint.sh
