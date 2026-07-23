@@ -59,28 +59,6 @@ export const getRangeStartMs = (range: MonitoringTimeRange, nowMs: number) => {
 };
 
 const DELETED_CREDENTIAL_FALLBACK_LABEL = 'Deleted credential';
-const EMPTY_MONITORING_SUMMARY: MonitoringSummary = {
-  totalCalls: 0,
-  successCalls: 0,
-  failureCalls: 0,
-  successRate: 1,
-  inputTokens: 0,
-  outputTokens: 0,
-  reasoningTokens: 0,
-  cachedTokens: 0,
-  totalTokens: 0,
-  totalCost: 0,
-  averageLatencyMs: null,
-  rpm30m: 0,
-  tpm30m: 0,
-  avgDailyRequests: 0,
-  avgDailyTokens: 0,
-  approxTasks: 0,
-  approxTaskFailures: 0,
-  approxTaskSuccessRate: 1,
-  zeroTokenCalls: 0,
-  zeroTokenModels: [],
-};
 
 const maskEmailLike = (value: string) => {
   const trimmed = value.trim();
@@ -195,106 +173,6 @@ export type MonitoringTimeRange = 'today' | '7d' | '14d' | '30d' | 'all';
 
 export type MonitoringStatusTone = 'good' | 'warn' | 'bad';
 
-export type MonitoringStatusChip = {
-  key: string;
-  label: string;
-  value: string;
-  tone: MonitoringStatusTone;
-};
-
-export type MonitoringKpi = {
-  key: string;
-  label: string;
-  value: number;
-  meta: number;
-};
-
-export type MonitoringTimelinePoint = {
-  label: string;
-  requests: number;
-  tokens: number;
-  cost: number;
-};
-
-export type MonitoringModelShareRow = {
-  model: string;
-  requests: number;
-  totalTokens: number;
-  totalCost: number;
-  successRate: number;
-};
-
-export type MonitoringChannelRow = {
-  id: string;
-  label: string;
-  host: string;
-  provider: string;
-  planTypes: string[];
-  disabled: boolean;
-  authCount: number;
-  modelCount: number;
-  requests: number;
-  failures: number;
-  successRate: number;
-  totalTokens: number;
-  totalCost: number;
-  averageLatencyMs: number | null;
-  authLabels: string[];
-};
-
-export type MonitoringModelRow = {
-  model: string;
-  requests: number;
-  failures: number;
-  successRate: number;
-  totalTokens: number;
-  totalCost: number;
-  averageLatencyMs: number | null;
-  sources: number;
-  channels: number;
-};
-
-export type MonitoringFailureSourceRow = {
-  id: string;
-  label: string;
-  channel: string;
-  failures: number;
-  totalRequests: number;
-  failureRate: number;
-  lastSeenAt: number;
-  averageLatencyMs: number | null;
-};
-
-export type MonitoringTaskBucketRow = {
-  id: string;
-  timestampMs: number;
-  timestamp: string;
-  source: string;
-  sourceMasked: string;
-  channel: string;
-  authLabel: string;
-  planType: string;
-  calls: number;
-  failedCalls: number;
-  failed: boolean;
-  modelsText: string;
-  totalTokens: number;
-  totalCost: number;
-  averageLatencyMs: number | null;
-  maxLatencyMs: number | null;
-  endpointsText: string;
-};
-
-export type MonitoringFailureRow = {
-  id: string;
-  timestampMs: number;
-  timestamp: string;
-  model: string;
-  source: string;
-  channel: string;
-  authIndex: string;
-  latencyMs: number | null;
-};
 
 export type MonitoringEventRow = {
   id: string;
@@ -439,50 +317,22 @@ export type MonitoringRealtimeRow = {
   recentPattern: boolean[];
 };
 
-export type MonitoringMetadata = {
-  totalAuthFiles: number;
-  activeAuthFiles: number;
-  unavailableAuthFiles: number;
-  runtimeOnlyAuthFiles: number;
-  totalChannels: number;
-  enabledChannels: number;
-  configuredModels: number;
-  planTypes: string[];
-};
 
-export interface UseMonitoringDataParams {
+export interface UseMonitoringEventRowsParams {
   usage: unknown;
   logUsage?: unknown;
-  serverFilteredLogs?: boolean;
   config: Config | null | undefined;
   modelPrices: Record<string, ModelPrice>;
-  timeRange: MonitoringTimeRange;
-  searchQuery: string;
-  filteredRowLimit?: number;
   deletedCredentialLabel?: string;
   unattributedApiKeyLabel?: string;
 }
 
-export interface UseMonitoringDataReturn {
+export interface UseMonitoringEventRowsReturn {
   loading: boolean;
   error: string;
   authFiles: AuthFileItem[];
-  channels: MonitoringChannelMeta[];
-  summary: MonitoringSummary;
-  metadata: MonitoringMetadata;
-  statusChips: MonitoringStatusChip[];
-  timeline: MonitoringTimelinePoint[];
-  timelineGranularity: 'hour' | 'day';
-  hourlyDistribution: MonitoringTimelinePoint[];
-  modelShareRows: MonitoringModelShareRow[];
-  channelRows: MonitoringChannelRow[];
-  modelRows: MonitoringModelRow[];
-  failureSourceRows: MonitoringFailureSourceRow[];
-  taskBuckets: MonitoringTaskBucketRow[];
-  recentFailures: MonitoringFailureRow[];
   allRows: MonitoringEventRow[];
   filteredRows: MonitoringEventRow[];
-  filteredRowCount: number;
   refreshMeta: (showLoading?: boolean) => Promise<void>;
 }
 
@@ -616,35 +466,6 @@ const normalizeAuthMeta = (entry: AuthFileItem): MonitoringAuthMeta | null => {
   };
 };
 
-const buildRangeFilteredRows = (
-  rows: MonitoringEventRow[],
-  timeRange: MonitoringTimeRange,
-  searchQuery: string,
-  limit = 0
-) => {
-  const nowMs = Date.now();
-  const startMs = getRangeStartMs(timeRange, nowMs);
-  const normalizedQuery = searchQuery.trim().toLowerCase();
-  const matchedRows: MonitoringEventRow[] = [];
-  let total = 0;
-
-  rows.forEach((row) => {
-    if (row.timestampMs > nowMs || row.timestampMs < startMs) {
-      return;
-    }
-
-    if (normalizedQuery && !row.searchText.includes(normalizedQuery)) {
-      return;
-    }
-
-    total += 1;
-    if (limit <= 0 || matchedRows.length < limit) {
-      matchedRows.push(row);
-    }
-  });
-
-  return { rows: matchedRows, total };
-};
 
 const addRecentPatternRow = (recentRows: MonitoringEventRow[], row: MonitoringEventRow, limit = 10) => {
   const insertAt = recentRows.findIndex((item) => row.timestampMs > item.timestampMs);
@@ -663,86 +484,6 @@ const addRecentPatternRow = (recentRows: MonitoringEventRow[], row: MonitoringEv
 const recentPatternFromRows = (recentRows: MonitoringEventRow[]) =>
   [...recentRows].reverse().map((row) => !row.failed);
 
-export const buildMonitoringSummary = (rows: MonitoringEventRow[]): MonitoringSummary => {
-  const totalCalls = rows.length;
-  let failureCalls = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let reasoningTokens = 0;
-  let cachedTokens = 0;
-  let totalTokens = 0;
-  let totalCost = 0;
-  let latencySum = 0;
-  let latencyCount = 0;
-  let recentCalls = 0;
-  let recentTokens = 0;
-  let zeroTokenCalls = 0;
-  const taskMap = new Map<string, boolean>();
-  const activeDays = new Set<string>();
-  const zeroTokenModels = new Set<string>();
-  const nowMs = Date.now();
-  const windowStart = nowMs - 30 * 60 * 1000;
-
-  rows.forEach((row) => {
-    if (row.failed) failureCalls += 1;
-    inputTokens += row.inputTokens;
-    outputTokens += row.outputTokens;
-    reasoningTokens += row.reasoningTokens;
-    cachedTokens += row.cachedTokens;
-    totalTokens += row.totalTokens;
-    totalCost += row.totalCost;
-    activeDays.add(row.dayKey);
-
-    if (row.latencyMs !== null) {
-      latencySum += row.latencyMs;
-      latencyCount += 1;
-    }
-
-    taskMap.set(row.taskKey, (taskMap.get(row.taskKey) ?? false) || row.failed);
-
-    if (row.totalTokens === 0) {
-      zeroTokenCalls += 1;
-      zeroTokenModels.add(row.model);
-    }
-
-    if (row.timestampMs >= windowStart && row.timestampMs <= nowMs) {
-      recentCalls += 1;
-      recentTokens += row.totalTokens;
-    }
-  });
-
-  const successCalls = Math.max(totalCalls - failureCalls, 0);
-  const approxTasks = taskMap.size;
-  let approxTaskFailures = 0;
-  taskMap.forEach((failed) => {
-    if (failed) approxTaskFailures += 1;
-  });
-  const activeDayCount = Math.max(activeDays.size, 1);
-
-  return {
-    totalCalls,
-    successCalls,
-    failureCalls,
-    successRate: totalCalls > 0 ? successCalls / totalCalls : 1,
-    inputTokens,
-    outputTokens,
-    reasoningTokens,
-    cachedTokens,
-    totalTokens,
-    totalCost,
-    averageLatencyMs: latencyCount > 0 ? latencySum / latencyCount : null,
-    rpm30m: recentCalls / 30,
-    tpm30m: recentTokens / 30,
-    avgDailyRequests: totalCalls / activeDayCount,
-    avgDailyTokens: totalTokens / activeDayCount,
-    approxTasks,
-    approxTaskFailures,
-    approxTaskSuccessRate:
-      approxTasks > 0 ? Math.max(approxTasks - approxTaskFailures, 0) / approxTasks : 1,
-    zeroTokenCalls,
-    zeroTokenModels: Array.from(zeroTokenModels).sort(),
-  };
-};
 
 export const buildAccountRows = ({
   rows,
@@ -1082,37 +823,6 @@ export const buildRealtimeMonitorRows = (rows: MonitoringEventRow[]): Monitoring
     .sort((left, right) => right.lastSeenAt - left.lastSeenAt || right.totalCalls - left.totalCalls);
 };
 
-const buildStatusChips = (metadata: MonitoringMetadata): MonitoringStatusChip[] => [
-  {
-    key: 'credentials',
-    label: 'credentials',
-    value: `${metadata.activeAuthFiles}/${metadata.totalAuthFiles}`,
-    tone:
-      metadata.totalAuthFiles === 0
-        ? 'warn'
-        : metadata.unavailableAuthFiles > 0
-          ? 'warn'
-          : 'good',
-  },
-  {
-    key: 'channels',
-    label: 'channels',
-    value: `${metadata.enabledChannels}/${metadata.totalChannels}`,
-    tone: metadata.enabledChannels === 0 ? 'bad' : metadata.enabledChannels < metadata.totalChannels ? 'warn' : 'good',
-  },
-  {
-    key: 'runtime_only',
-    label: 'runtime_only',
-    value: String(metadata.runtimeOnlyAuthFiles),
-    tone: metadata.runtimeOnlyAuthFiles > 0 ? 'warn' : 'good',
-  },
-  {
-    key: 'models',
-    label: 'models',
-    value: String(metadata.configuredModels),
-    tone: metadata.configuredModels > 0 ? 'good' : 'warn',
-  },
-];
 
 const buildEventRows = (
   details: UsageDetailWithEndpoint[],
@@ -1414,18 +1124,14 @@ const loadMonitoringMetaPayload = async (
   return { authFiles, channels, error };
 };
 
-export function useMonitoringData({
+export function useMonitoringEventRows({
   usage,
   logUsage,
-  serverFilteredLogs = false,
   config,
   modelPrices,
-  timeRange,
-  searchQuery,
-  filteredRowLimit = 0,
   deletedCredentialLabel = DELETED_CREDENTIAL_FALLBACK_LABEL,
   unattributedApiKeyLabel = 'Unattributed API Key',
-}: UseMonitoringDataParams): UseMonitoringDataReturn {
+}: UseMonitoringEventRowsParams): UseMonitoringEventRowsReturn {
   const [authFiles, setAuthFiles] = useState<AuthFileItem[]>([]);
   const [channels, setChannels] = useState<MonitoringChannelMeta[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1574,55 +1280,12 @@ export function useMonitoringData({
     );
   }, [allRows, authFileMap, authMetaMap, channelByAuthIndex, configuredApiKeys, deletedCredentialLabel, logUsage, modelPrices, sourceInfoMap, unattributedApiKeyLabel]);
 
-  const filteredRowState = useMemo(
-    () => serverFilteredLogs
-      ? { rows: logRows, total: logRows.length }
-      : buildRangeFilteredRows(logRows, timeRange, searchQuery, filteredRowLimit),
-    [filteredRowLimit, logRows, searchQuery, serverFilteredLogs, timeRange]
-  );
-  const filteredRows = filteredRowState.rows;
-  const filteredRowCount = filteredRowState.total;
-  const metadata = useMemo<MonitoringMetadata>(() => {
-    const planTypes = Array.from(
-      new Set(Array.from(authMetaMap.values()).map((item) => item.planType).filter((item) => item && item !== '-'))
-    ).sort();
-
-    return {
-      totalAuthFiles: authFiles.length,
-      activeAuthFiles: Array.from(authMetaMap.values()).filter(
-        (item) => !item.disabled && !item.unavailable && item.status === 'active'
-      ).length,
-      unavailableAuthFiles: Array.from(authMetaMap.values()).filter((item) => item.unavailable).length,
-      runtimeOnlyAuthFiles: Array.from(authMetaMap.values()).filter((item) => item.runtimeOnly).length,
-      totalChannels: channels.length,
-      enabledChannels: channels.filter((item) => !item.disabled).length,
-      configuredModels: Array.from(new Set(channels.flatMap((item) => item.modelNames))).length,
-      planTypes,
-    };
-  }, [authFiles.length, authMetaMap, channels]);
-
-  const statusChips = useMemo(() => buildStatusChips(metadata), [metadata]);
-
   return {
     loading,
     error,
     authFiles,
-    channels,
-    summary: EMPTY_MONITORING_SUMMARY,
-    metadata,
-    statusChips,
-    timeline: [],
-    timelineGranularity: 'day',
-    hourlyDistribution: [],
-    modelShareRows: [],
-    channelRows: [],
-    modelRows: [],
-    failureSourceRows: [],
-    taskBuckets: [],
-    recentFailures: [],
     allRows,
-    filteredRows,
-    filteredRowCount,
+    filteredRows: logRows,
     refreshMeta,
   };
 }

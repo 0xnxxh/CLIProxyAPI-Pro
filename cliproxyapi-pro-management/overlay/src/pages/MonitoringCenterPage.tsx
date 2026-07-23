@@ -13,7 +13,7 @@ import {
   buildAccountRowsByAccount,
   buildLocalDayKey,
   getRangeStartMs,
-  useMonitoringData,
+  useMonitoringEventRows,
   type MonitoringEventRow,
   type MonitoringTimeRange,
 } from '@/features/monitoring/hooks/useMonitoringData';
@@ -331,14 +331,11 @@ export function MonitoringCenterPage() {
     allRows,
     filteredRows,
     refreshMeta,
-  } = useMonitoringData({
+  } = useMonitoringEventRows({
     usage: deferredUsage,
     logUsage: realtimeLogUsage,
-    serverFilteredLogs: true,
     config,
     modelPrices,
-    timeRange,
-    searchQuery: '',
     deletedCredentialLabel: t('monitoring.deleted_credential'),
     unattributedApiKeyLabel: t('monitoring.api_key_unattributed'),
   });

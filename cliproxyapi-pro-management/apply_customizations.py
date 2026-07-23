@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import hashlib
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -269,7 +268,13 @@ def write(path: Path, text: str) -> None:
 
 def flush_writes() -> None:
     for path, text in _writes.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
+    _writes.clear()
+
+
+def discard_writes() -> None:
+    _writes.clear()
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -384,13 +389,11 @@ def validate_overlay_collisions(target: Path) -> None:
 def copy_overlay(target: Path) -> None:
     validate_overlay_collisions(target)
     for src in OVERLAY_DIR.rglob('*'):
+        if src.is_dir():
+            continue
         rel = src.relative_to(OVERLAY_DIR)
         dst = target / rel
-        if src.is_dir():
-            dst.mkdir(parents=True, exist_ok=True)
-        else:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+        write(dst, src.read_text())
 
 
 def patch_modal_focus_restore(target: Path) -> None:
@@ -2276,7 +2279,7 @@ def patch_locales(target: Path) -> None:
     monitoring = json.loads(LOCALES_FILE.read_text())
     locales_dir = target / 'src/i18n/locales'
     for locale_path in sorted(locales_dir.glob('*.json')):
-        data = json.loads(locale_path.read_text())
+        data = json.loads(read(locale_path))
         additions = monitoring.get(locale_path.name, {})
         data.setdefault('nav', {}).update(additions.get('nav', {}))
         nav_additions = additions.get('nav', {})
@@ -2334,7 +2337,7 @@ def patch_locales(target: Path) -> None:
                 'claude_model_id_cloak_never': cloak_locale['never'],
             }
         )
-        locale_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+        write(locale_path, json.dumps(data, ensure_ascii=False, indent=2) + '\n')
 
 
 def main() -> None:

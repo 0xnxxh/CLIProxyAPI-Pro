@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,11 +12,24 @@ import (
 )
 
 type QuotaResult struct {
-	Handled  bool
-	PluginID string
-	Snapshot pluginapi.QuotaSnapshot
-	Auth     *coreauth.Auth
-	Err      error
+	Handled        bool
+	PluginID       string
+	Snapshot       pluginapi.QuotaSnapshot
+	Auth           *coreauth.Auth
+	UpstreamStatus int
+	Err            error
+}
+
+type quotaHTTPStatusError interface {
+	HTTPStatus() int
+}
+
+func quotaUpstreamStatus(err error) int {
+	var statusError quotaHTTPStatusError
+	if errors.As(err, &statusError) {
+		return statusError.HTTPStatus()
+	}
+	return 0
 }
 
 const quotaObservationFutureSkew = 5 * time.Minute
@@ -57,14 +71,14 @@ func (h *Host) FetchQuota(ctx context.Context, auth *coreauth.Auth, previous *pl
 		}
 		resp, errFetch := h.callFetchQuota(ctx, record, quotaProvider, auth, previous)
 		if errFetch != nil {
-			return QuotaResult{Handled: true, PluginID: record.id, Err: errFetch}
+			return QuotaResult{Handled: true, PluginID: record.id, UpstreamStatus: quotaUpstreamStatus(errFetch), Err: errFetch}
 		}
 		return h.quotaResultFromResponse(record.id, provider, auth, previous, resp)
 	}
 	if record, okLegacy := h.legacyQuotaAdapter(provider); okLegacy {
 		resp, errFetch := h.fetchLegacyGeminiCLIQuota(ctx, auth)
 		if errFetch != nil {
-			return QuotaResult{Handled: true, PluginID: record.id, Err: errFetch}
+			return QuotaResult{Handled: true, PluginID: record.id, UpstreamStatus: quotaUpstreamStatus(errFetch), Err: errFetch}
 		}
 		return h.quotaResultFromResponse(record.id, provider, auth, previous, resp)
 	}

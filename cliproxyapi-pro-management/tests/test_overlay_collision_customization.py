@@ -41,8 +41,11 @@ class OverlayCollisionCustomizationTest(unittest.TestCase):
             }
 
             CUSTOMIZATIONS.copy_overlay(target)
+            self.assertEqual('upstream\n', destination.read_text())
+            CUSTOMIZATIONS.flush_writes()
             self.assertEqual('customized\n', destination.read_text())
             CUSTOMIZATIONS.copy_overlay(target)
+            CUSTOMIZATIONS.flush_writes()
             self.assertEqual('customized\n', destination.read_text())
 
     def test_rejects_unreviewed_upstream_change(self) -> None:
@@ -105,6 +108,28 @@ class OverlayCollisionCustomizationTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Unexpected overlay collision'):
                 CUSTOMIZATIONS.copy_overlay(target)
             self.assertFalse((target / 'src/new.ts').exists())
+
+    def test_late_patch_failure_does_not_write_queued_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = root / 'overlay'
+            target = root / 'target'
+            overlay_file = overlay / 'src/new.ts'
+            upstream_file = target / 'src/upstream.ts'
+            overlay_file.parent.mkdir(parents=True)
+            upstream_file.parent.mkdir(parents=True)
+            overlay_file.write_text('new customization\n')
+            upstream_file.write_text('upstream\n')
+
+            CUSTOMIZATIONS.OVERLAY_DIR = overlay
+            CUSTOMIZATIONS.OVERLAY_REPLACEMENT_HASHES = {}
+            CUSTOMIZATIONS.copy_overlay(target)
+
+            with self.assertRaisesRegex(RuntimeError, 'Expected one pattern'):
+                CUSTOMIZATIONS.replace_once(upstream_file, 'missing anchor', 'replacement')
+
+            self.assertFalse((target / 'src/new.ts').exists())
+            CUSTOMIZATIONS.discard_writes()
 
 
 if __name__ == '__main__':

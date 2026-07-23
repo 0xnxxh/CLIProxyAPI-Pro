@@ -21,6 +21,18 @@ const (
 	legacyGeminiCLIGoogleOneAI   = "GOOGLE_ONE_AI"
 )
 
+type legacyGeminiCLIHTTPError struct {
+	status int
+}
+
+func (err legacyGeminiCLIHTTPError) Error() string {
+	return fmt.Sprintf("status %d", err.status)
+}
+
+func (err legacyGeminiCLIHTTPError) HTTPStatus() int {
+	return err.status
+}
+
 func (h *Host) legacyQuotaProviderForRecord(record capabilityRecord) (string, bool) {
 	if h == nil || record.plugin.Capabilities.QuotaProvider != nil {
 		return "", false
@@ -120,7 +132,7 @@ func (h *Host) callLegacyGeminiCLIEndpoint(ctx context.Context, auth *coreauth.A
 		return fmt.Errorf("response exceeds %d bytes", legacyGeminiCLIMaxBodyBytes)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("status %d", resp.StatusCode)
+		return legacyGeminiCLIHTTPError{status: resp.StatusCode}
 	}
 	if errDecode := json.Unmarshal(responseBody, out); errDecode != nil {
 		return fmt.Errorf("decode response: %w", errDecode)
@@ -132,16 +144,31 @@ func legacyGeminiCLIProjectID(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if value := strings.TrimSpace(auth.Attributes["project_id"]); value != "" {
-		return value
+	for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
+		if value := legacyGeminiCLIFirstProjectID(auth.Attributes[key]); value != "" {
+			return value
+		}
 	}
-	if value, _ := auth.Metadata["project_id"].(string); strings.TrimSpace(value) != "" {
-		return strings.TrimSpace(value)
+	for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
+		if value, _ := auth.Metadata[key].(string); legacyGeminiCLIFirstProjectID(value) != "" {
+			return legacyGeminiCLIFirstProjectID(value)
+		}
 	}
 	var storage map[string]any
 	if json.Unmarshal(storageJSONFromAuth(auth), &storage) == nil {
-		if value, _ := storage["project_id"].(string); strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+		for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
+			if value, _ := storage[key].(string); legacyGeminiCLIFirstProjectID(value) != "" {
+				return legacyGeminiCLIFirstProjectID(value)
+			}
+		}
+	}
+	return ""
+}
+
+func legacyGeminiCLIFirstProjectID(value string) string {
+	for _, part := range strings.Split(value, ",") {
+		if projectID := strings.TrimSpace(part); projectID != "" {
+			return projectID
 		}
 	}
 	return ""
@@ -247,11 +274,16 @@ func legacyGeminiCLIParseBuckets(value any) []legacyGeminiCLIBucket {
 		if modelID == "" {
 			continue
 		}
+		remainingFraction := legacyGeminiCLIFirstNumber(row, "remainingFraction", "remaining_fraction")
+		remainingAmount := legacyGeminiCLIFirstNumber(row, "remainingAmount", "remaining_amount")
+		resetAt := legacyGeminiCLIFirstString(row, "resetTime", "reset_time")
+		if remainingFraction == nil && ((remainingAmount != nil && *remainingAmount <= 0) || resetAt != "") {
+			zero := 0.0
+			remainingFraction = &zero
+		}
 		out = append(out, legacyGeminiCLIBucket{
 			modelID: modelID, tokenType: legacyGeminiCLIFirstString(row, "tokenType", "token_type"),
-			resetAt:           legacyGeminiCLIFirstString(row, "resetTime", "reset_time"),
-			remainingFraction: legacyGeminiCLIFirstNumber(row, "remainingFraction", "remaining_fraction"),
-			remainingAmount:   legacyGeminiCLIFirstNumber(row, "remainingAmount", "remaining_amount"),
+			resetAt: resetAt, remainingFraction: remainingFraction, remainingAmount: remainingAmount,
 		})
 	}
 	return out

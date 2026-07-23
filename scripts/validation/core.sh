@@ -46,6 +46,38 @@ if [[ -n "$(git -C "${upstream_root}" status --porcelain)" ]]; then
   exit 1
 fi
 
+late_guarded_source='sdk/cliproxy/auth/scheduler.go'
+python3 - "${upstream_root}/${late_guarded_source}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+anchor = '\t\ts.mixedCursors[cursorKey] = slot + 1\n\t\treturn picked, providerKey, nil\n'
+if source.count(anchor) != 1:
+    raise SystemExit(f'late Core preflight anchor count is {source.count(anchor)}, want 1')
+path.write_text(source.replace(anchor, anchor.replace('return picked', 'return  picked'), 1))
+PY
+late_preflight_status="$(git -C "${upstream_root}" status --porcelain=v1 -uall)"
+late_preflight_diff_hash="$(git -C "${upstream_root}" diff --binary | git hash-object --stdin)"
+late_preflight_log="$(mktemp "${TMPDIR:-/tmp}/cliproxyapi-pro-late-preflight.XXXXXX")"
+if python3 "${repo_root}/cliproxyapi-pro-core/patches/apply_upstream_patches.py" >"${late_preflight_log}" 2>&1; then
+  echo "Core customization unexpectedly accepted a changed late patch anchor" >&2
+  exit 1
+fi
+if ! grep -Fq 'expected one pattern' "${late_preflight_log}"; then
+  cat "${late_preflight_log}" >&2
+  echo "Core customization did not fail with the expected late-anchor error" >&2
+  exit 1
+fi
+if [[ "$(git -C "${upstream_root}" status --porcelain=v1 -uall)" != "${late_preflight_status}" ]] || \
+   [[ "$(git -C "${upstream_root}" diff --binary | git hash-object --stdin)" != "${late_preflight_diff_hash}" ]]; then
+  echo "Core customization changed the source tree before validating every patch anchor" >&2
+  exit 1
+fi
+git -C "${upstream_root}" restore --worktree -- "${late_guarded_source}"
+rm -f "${late_preflight_log}"
+
 python3 "${repo_root}/cliproxyapi-pro-core/patches/apply_upstream_patches.py"
 git -C "${upstream_root}" diff --check
 

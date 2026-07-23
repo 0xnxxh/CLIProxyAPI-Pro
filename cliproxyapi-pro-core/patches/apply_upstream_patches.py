@@ -2,11 +2,11 @@
 import hashlib
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 ROOT = Path(os.environ.get('SRC_ROOT', '/src/CLIProxyAPI'))
+PATCH_SOURCE_DIR = Path(__file__).resolve().parent / 'sources'
 PRO_PANEL_REPOSITORY = 'https://github.com/ssfun/CLIProxyAPI-Pro'
 PRO_PANEL_RELEASE_API = 'https://api.github.com/repos/ssfun/CLIProxyAPI-Pro/releases/latest'
 
@@ -49,15 +49,29 @@ def import_path(suffix: str) -> str:
     return f'{MODULE_PATH}/{suffix}'
 
 
-def rewrite_module_imports(path: Path) -> None:
-    text = read(path)
-    text = re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, text)
-    write(path, text)
-
-
 def flush_writes() -> None:
     for path, text in _writes.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
         write_text(path, text)
+    _writes.clear()
+
+
+def queue_tree(source: Path, target: Path) -> None:
+    for source_path in source.rglob('*'):
+        if source_path.is_dir():
+            continue
+        text = read_text(source_path)
+        if source_path.suffix == '.go':
+            text = re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, text)
+        write(target / source_path.relative_to(source), text)
+
+
+def queue_go_source(relative_path: str) -> None:
+    source = PATCH_SOURCE_DIR / relative_path
+    if not source.is_file():
+        raise SystemExit(f'Go patch source not found: {source}')
+    text = re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(source))
+    write(ROOT / relative_path, text)
 
 
 def replace_once(path: Path, old: str, new: str, present=None) -> None:
@@ -380,22 +394,22 @@ replace_once(
 
 quota_provider_source = Path(__file__).resolve().parent / 'plugin_quota_provider.go'
 quota_provider_target = ROOT / 'internal/pluginhost/quota_provider.go'
-write_text(quota_provider_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(quota_provider_source)))
+write(quota_provider_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(quota_provider_source)))
 quota_provider_test_source = Path(__file__).resolve().parent / 'plugin_quota_provider_test.go'
 quota_provider_test_target = ROOT / 'internal/pluginhost/quota_provider_test.go'
-write_text(quota_provider_test_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(quota_provider_test_source)))
+write(quota_provider_test_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(quota_provider_test_source)))
 
 legacy_gemini_quota_source = Path(__file__).resolve().parent / 'plugin_gemini_cli_quota_legacy.go'
 legacy_gemini_quota_target = ROOT / 'internal/pluginhost/gemini_cli_quota_legacy.go'
-write_text(legacy_gemini_quota_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(legacy_gemini_quota_source)))
+write(legacy_gemini_quota_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(legacy_gemini_quota_source)))
 legacy_gemini_quota_test_source = Path(__file__).resolve().parent / 'plugin_gemini_cli_quota_legacy_test.go'
 legacy_gemini_quota_test_target = ROOT / 'internal/pluginhost/gemini_cli_quota_legacy_test.go'
-write_text(legacy_gemini_quota_test_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(legacy_gemini_quota_test_source)))
+write(legacy_gemini_quota_test_target, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(legacy_gemini_quota_test_source)))
 
 plugin_quota_management = ROOT / 'internal/api/handlers/management/plugin_quota.go'
-write_text(plugin_quota_management, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'plugin_quota_management.go')))
+write(plugin_quota_management, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'plugin_quota_management.go')))
 plugin_quota_management_test = ROOT / 'internal/api/handlers/management/plugin_quota_test.go'
-write_text(plugin_quota_management_test, read_text(Path(__file__).resolve().parent / 'plugin_quota_management_test.go'))
+write(plugin_quota_management_test, read_text(Path(__file__).resolve().parent / 'plugin_quota_management_test.go'))
 
 usage_manager = ROOT / 'sdk/cliproxy/usage/manager.go'
 add_go_import(usage_manager, '"net/http"\n', '\t"reflect"\n')
@@ -760,7 +774,7 @@ func TestClaudeModelsCloakMode(t *testing.T) {
 ''' + '\n')
 
 routing_protection_config = ROOT / 'internal/config/routing_protection_config.go'
-write_text(routing_protection_config, read_text(Path(__file__).resolve().parent / 'routing_protection_config.go'))
+write(routing_protection_config, read_text(Path(__file__).resolve().parent / 'routing_protection_config.go'))
 replace_once(
     config_go,
     '''\tSessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
@@ -868,610 +882,9 @@ replace_once(
 ''',
 )
 
-write_text(ROOT / 'internal/pluginstore/autoinstall.go', f'''package pluginstore
+queue_go_source('internal/pluginstore/autoinstall.go')
 
-import (
-\t"context"
-\t"net/http"
-\t"os"
-\t"path/filepath"
-\t"regexp"
-\t"runtime"
-\t"sort"
-\t"strings"
-
-\t"{import_path('sdk/proxyutil')}"
-\tlog "github.com/sirupsen/logrus"
-\t"golang.org/x/sys/cpu"
-)
-
-var autoInstallPluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{{0,127}}$`)
-
-// AutoInstallWarning describes a non-fatal plugin auto-install issue.
-type AutoInstallWarning struct {{
-\tPluginID string
-\tSourceID string
-\tSourceURL string
-\tMessage string
-}}
-
-// AutoInstallReport summarizes startup plugin auto-install work.
-type AutoInstallReport struct {{
-\tInstalled []InstallResult
-\tWarnings []AutoInstallWarning
-}}
-
-// AutoInstallConfig is the small read-only config surface needed by plugin auto-install.
-type AutoInstallConfig interface {{
-\tNormalizePluginsConfig()
-\tPluginAutoInstallProxyURL() string
-\tPluginAutoInstallEnabled() bool
-\tPluginAutoInstallDir() string
-\tPluginAutoInstallStoreSources() []string
-\tPluginAutoInstallEnabledIDs() []string
-}}
-
-type autoInstallOptions struct {{
-\tHTTPClient HTTPDoer
-\tGOOS string
-\tGOARCH string
-\tInstall func(context.Context, Client, Plugin, InstallOptions) (InstallResult, error)
-}}
-
-type autoInstallSourcePlugin struct {{
-\tsource Source
-\tplugin Plugin
-}}
-
-// EnsureConfiguredPluginsInstalled downloads missing enabled plugins before the plugin host scans local binaries.
-func EnsureConfiguredPluginsInstalled(ctx context.Context, cfg AutoInstallConfig) AutoInstallReport {{
-\treport := ensureConfiguredPluginsInstalled(ctx, cfg, autoInstallOptions{{}})
-\tfor _, warning := range report.Warnings {{
-\t\tfields := log.Fields{{}}
-\t\tif warning.PluginID != "" {{
-\t\t\tfields["plugin_id"] = warning.PluginID
-\t\t}}
-\t\tif warning.SourceID != "" {{
-\t\t\tfields["source_id"] = warning.SourceID
-\t\t}}
-\t\tif warning.SourceURL != "" {{
-\t\t\tfields["source_url"] = warning.SourceURL
-\t\t}}
-\t\tlog.WithFields(fields).Warnf("pluginstore: auto install skipped: %s", warning.Message)
-\t}}
-\tfor _, installed := range report.Installed {{
-\t\tlog.WithFields(log.Fields{{
-\t\t\t"plugin_id": installed.ID,
-\t\t\t"version": installed.Version,
-\t\t\t"path": installed.Path,
-\t\t}}).Info("pluginstore: plugin auto installed")
-\t}}
-\treturn report
-}}
-
-func ensureConfiguredPluginsInstalled(ctx context.Context, cfg AutoInstallConfig, options autoInstallOptions) AutoInstallReport {{
-\tvar report AutoInstallReport
-\tif ctx == nil {{
-\t\tctx = context.Background()
-\t}}
-\tif cfg == nil {{
-\t\treturn report
-\t}}
-\tcfg.NormalizePluginsConfig()
-\tif !cfg.PluginAutoInstallEnabled() {{
-\t\treturn report
-\t}}
-
-\tenabledIDs := enabledConfiguredPluginIDs(cfg)
-\tif len(enabledIDs) == 0 {{
-\t\treturn report
-\t}}
-
-\tinstalledIDs, errDiscover := installedPluginIDs(cfg.PluginAutoInstallDir())
-\tif errDiscover != nil {{
-\t\treport.Warnings = append(report.Warnings, AutoInstallWarning{{Message: "discover installed plugins: " + errDiscover.Error()}})
-\t\treturn report
-\t}}
-
-\tmissingIDs := make([]string, 0, len(enabledIDs))
-\tfor _, id := range enabledIDs {{
-\t\tif _, installed := installedIDs[id]; installed {{
-\t\t\tcontinue
-\t\t}}
-\t\tmissingIDs = append(missingIDs, id)
-\t}}
-\tif len(missingIDs) == 0 {{
-\t\treturn report
-\t}}
-\twanted := make(map[string]struct{{}}, len(missingIDs))
-\tfor _, id := range missingIDs {{
-\t\twanted[id] = struct{{}}{{}}
-\t}}
-
-\tsources, errSources := NormalizeSources(cfg.PluginAutoInstallStoreSources())
-\tif errSources != nil {{
-\t\treport.Warnings = append(report.Warnings, AutoInstallWarning{{Message: "normalize plugin store sources: " + errSources.Error()}})
-\t\treturn report
-\t}}
-
-\thttpClient := options.HTTPClient
-\tif httpClient == nil {{
-\t\thttpClient = autoInstallHTTPClient(cfg.PluginAutoInstallProxyURL())
-\t}}
-
-\tmatches := make(map[string][]autoInstallSourcePlugin, len(missingIDs))
-\tfor _, source := range sources {{
-\t\tclient := Client{{HTTPClient: httpClient, RegistryURL: source.URL}}
-\t\tregistry, errRegistry := client.FetchRegistry(ctx)
-\t\tif errRegistry != nil {{
-\t\t\treport.Warnings = append(report.Warnings, AutoInstallWarning{{
-\t\t\t\tSourceID: source.ID,
-\t\t\t\tSourceURL: source.URL,
-\t\t\t\tMessage: "fetch plugin registry: " + errRegistry.Error(),
-\t\t\t}})
-\t\t\tcontinue
-\t\t}}
-\t\tfor _, plugin := range registry.Plugins {{
-\t\t\tif _, ok := wanted[plugin.ID]; !ok {{
-\t\t\t\tcontinue
-\t\t\t}}
-\t\t\tmatches[plugin.ID] = append(matches[plugin.ID], autoInstallSourcePlugin{{source: source, plugin: plugin}})
-\t\t}}
-\t}}
-
-\tinstaller := options.Install
-\tif installer == nil {{
-\t\tinstaller = func(ctx context.Context, client Client, plugin Plugin, installOptions InstallOptions) (InstallResult, error) {{
-\t\t\treturn client.Install(ctx, plugin, installOptions)
-\t\t}}
-\t}}
-\tgoos := strings.TrimSpace(options.GOOS)
-\tif goos == "" {{
-\t\tgoos = runtime.GOOS
-\t}}
-\tgoarch := strings.TrimSpace(options.GOARCH)
-\tif goarch == "" {{
-\t\tgoarch = runtime.GOARCH
-\t}}
-
-\tfor _, id := range missingIDs {{
-\t\tcandidates := matches[id]
-\t\tswitch len(candidates) {{
-\t\tcase 0:
-\t\t\treport.Warnings = append(report.Warnings, AutoInstallWarning{{PluginID: id, Message: "plugin not found in configured registries"}})
-\t\t\tcontinue
-\t\tcase 1:
-\t\t\tcandidate := candidates[0]
-\t\t\tresult, errInstall := installer(ctx, Client{{HTTPClient: httpClient, RegistryURL: candidate.source.URL}}, candidate.plugin, InstallOptions{{
-\t\t\t\tPluginsDir: cfg.PluginAutoInstallDir(),
-\t\t\t\tGOOS: goos,
-\t\t\t\tGOARCH: goarch,
-\t\t\t}})
-\t\t\tif errInstall != nil {{
-\t\t\t\treport.Warnings = append(report.Warnings, AutoInstallWarning{{
-\t\t\t\t\tPluginID: id,
-\t\t\t\t\tSourceID: candidate.source.ID,
-\t\t\t\t\tSourceURL: candidate.source.URL,
-\t\t\t\t\tMessage: "install plugin: " + errInstall.Error(),
-\t\t\t\t}})
-\t\t\t\tcontinue
-\t\t\t}}
-\t\t\treport.Installed = append(report.Installed, result)
-\t\tdefault:
-\t\t\treport.Warnings = append(report.Warnings, AutoInstallWarning{{PluginID: id, Message: "plugin id appears in multiple registries; install source is ambiguous"}})
-\t\t}}
-\t}}
-
-\treturn report
-}}
-
-func enabledConfiguredPluginIDs(cfg AutoInstallConfig) []string {{
-\tconfiguredIDs := cfg.PluginAutoInstallEnabledIDs()
-\tids := make([]string, 0, len(configuredIDs))
-\tfor _, id := range configuredIDs {{
-\t\tid = strings.TrimSpace(id)
-\t\tif id == "" {{
-\t\t\tcontinue
-\t\t}}
-\t\tif !autoInstallValidatePluginID(id) {{
-\t\t\tcontinue
-\t\t}}
-\t\tids = append(ids, id)
-\t}}
-\tsort.Strings(ids)
-\treturn ids
-}}
-
-func installedPluginIDs(pluginsDir string) (map[string]struct{{}}, error) {{
-\tfiles, err := autoInstallDiscoverPluginFiles(pluginsDir)
-\tif err != nil {{
-\t\treturn nil, err
-\t}}
-\tout := make(map[string]struct{{}}, len(files))
-\tfor _, file := range files {{
-\t\tout[file.ID] = struct{{}}{{}}
-\t}}
-\treturn out, nil
-}}
-
-type autoInstallPluginFile struct {{
-\tID string
-\tPath string
-}}
-
-func autoInstallValidatePluginID(id string) bool {{
-\treturn autoInstallPluginIDPattern.MatchString(id)
-}}
-
-func autoInstallPluginIDFromPath(path string) string {{
-\tbase := filepath.Base(path)
-\tlowerBase := strings.ToLower(base)
-\tfor _, extension := range []string{{".so", ".dylib", ".dll"}} {{
-\t\tif strings.HasSuffix(lowerBase, extension) {{
-\t\t\treturn base[:len(base)-len(extension)]
-\t\t}}
-\t}}
-\treturn base
-}}
-
-func autoInstallPluginExtension(goos string) string {{
-\tswitch goos {{
-\tcase "darwin":
-\t\treturn ".dylib"
-\tcase "windows":
-\t\treturn ".dll"
-\tdefault:
-\t\treturn ".so"
-\t}}
-}}
-
-func autoInstallDiscoverPluginFiles(root string) ([]autoInstallPluginFile, error) {{
-\troot = strings.TrimSpace(root)
-\tif root == "" {{
-\t\troot = "plugins"
-\t}}
-
-\tcandidates := autoInstallCandidateDirs(root, runtime.GOOS, runtime.GOARCH, autoInstallCPUVariant())
-\textension := autoInstallPluginExtension(runtime.GOOS)
-\tselected := make([]autoInstallPluginFile, 0)
-\tseen := make(map[string]struct{{}})
-\tfor _, dir := range candidates {{
-\t\tentries, errReadDir := os.ReadDir(dir)
-\t\tif errReadDir != nil {{
-\t\t\tif os.IsNotExist(errReadDir) {{
-\t\t\t\tcontinue
-\t\t\t}}
-\t\t\treturn nil, errReadDir
-\t\t}}
-\t\tfiles := make([]string, 0, len(entries))
-\t\tfor _, entry := range entries {{
-\t\t\tif entry == nil || !entry.Type().IsRegular() {{
-\t\t\t\tcontinue
-\t\t\t}}
-\t\t\tif strings.HasSuffix(strings.ToLower(entry.Name()), extension) {{
-\t\t\t\tfiles = append(files, filepath.Join(dir, entry.Name()))
-\t\t\t}}
-\t\t}}
-\t\tsort.Strings(files)
-\t\tfor _, path := range files {{
-\t\t\tid := autoInstallPluginIDFromPath(path)
-\t\t\tif !autoInstallValidatePluginID(id) {{
-\t\t\t\tcontinue
-\t\t\t}}
-\t\t\tif _, exists := seen[id]; exists {{
-\t\t\t\tcontinue
-\t\t\t}}
-\t\t\tseen[id] = struct{{}}{{}}
-\t\t\tselected = append(selected, autoInstallPluginFile{{ID: id, Path: path}})
-\t\t}}
-\t}}
-\treturn selected, nil
-}}
-
-func autoInstallCandidateDirs(root, goos, goarch, variant string) []string {{
-\tdirs := make([]string, 0, 3)
-\tif variant != "" {{
-\t\tdirs = append(dirs, filepath.Join(root, goos, goarch+"-"+variant))
-\t}}
-\tdirs = append(dirs, filepath.Join(root, goos, goarch))
-\tdirs = append(dirs, root)
-\treturn dirs
-}}
-
-func autoInstallCPUVariant() string {{
-\tif runtime.GOARCH != "amd64" {{
-\t\treturn ""
-\t}}
-\tif cpu.X86.HasAVX512F && cpu.X86.HasAVX512BW && cpu.X86.HasAVX512CD && cpu.X86.HasAVX512DQ && cpu.X86.HasAVX512VL {{
-\t\treturn "v4"
-\t}}
-\tif cpu.X86.HasAVX && cpu.X86.HasAVX2 && cpu.X86.HasBMI1 && cpu.X86.HasBMI2 && cpu.X86.HasFMA {{
-\t\treturn "v3"
-\t}}
-\tif cpu.X86.HasSSE3 && cpu.X86.HasSSSE3 && cpu.X86.HasSSE41 && cpu.X86.HasSSE42 && cpu.X86.HasPOPCNT {{
-\t\treturn "v2"
-\t}}
-\treturn "v1"
-}}
-
-func autoInstallHTTPClient(proxyURL string) HTTPDoer {{
-\tclient := &http.Client{{}}
-\tproxyURL = strings.TrimSpace(proxyURL)
-\tif proxyURL == "" {{
-\t\treturn client
-\t}}
-\ttransport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
-\tif errBuild != nil {{
-\t\tlog.WithError(errBuild).Warn("pluginstore: invalid proxy URL for auto install")
-\t\treturn client
-\t}}
-\tif transport != nil {{
-\t\tclient.Transport = transport
-\t}}
-\treturn client
-}}
-''')
-
-write_text(ROOT / 'internal/pluginstore/autoinstall_test.go', f'''package pluginstore
-
-import (
-\t"context"
-\t"io"
-\t"net/http"
-\t"os"
-\t"path/filepath"
-\t"runtime"
-\t"sort"
-\t"strings"
-\t"testing"
-)
-
-type autoInstallFakeDoer map[string]string
-
-func (d autoInstallFakeDoer) Do(req *http.Request) (*http.Response, error) {{
-\tbody, ok := d[req.URL.String()]
-\tif !ok {{
-\t\treturn &http.Response{{
-\t\t\tStatusCode: http.StatusNotFound,
-\t\t\tBody: io.NopCloser(strings.NewReader("missing")),
-\t\t\tHeader: make(http.Header),
-\t\t}}, nil
-\t}}
-\treturn &http.Response{{
-\t\tStatusCode: http.StatusOK,
-\t\tBody: io.NopCloser(strings.NewReader(body)),
-\t\tHeader: make(http.Header),
-\t}}, nil
-}}
-
-func enabledBoolPtr(value bool) *bool {{
-\treturn &value
-}}
-
-type fakeAutoInstallPlugin struct {{
-\tEnabled *bool
-}}
-
-type fakeAutoInstallConfig struct {{
-\tProxyURL string
-\tEnabled bool
-\tDir string
-\tStoreSources []string
-\tConfigs map[string]fakeAutoInstallPlugin
-}}
-
-func (cfg *fakeAutoInstallConfig) NormalizePluginsConfig() {{
-\tif cfg == nil {{
-\t\treturn
-\t}}
-\tcfg.Dir = strings.TrimSpace(cfg.Dir)
-\tif cfg.Dir == "" {{
-\t\tcfg.Dir = "plugins"
-\t}}
-\tif len(cfg.StoreSources) > 0 {{
-\t\tsources := make([]string, 0, len(cfg.StoreSources))
-\t\tfor _, source := range cfg.StoreSources {{
-\t\t\tsource = strings.TrimSpace(source)
-\t\t\tif source == "" {{
-\t\t\t\tcontinue
-\t\t\t}}
-\t\t\tsources = append(sources, source)
-\t\t}}
-\t\tcfg.StoreSources = sources
-\t}}
-\tif cfg.Configs == nil {{
-\t\tcfg.Configs = map[string]fakeAutoInstallPlugin{{}}
-\t}}
-}}
-
-func (cfg *fakeAutoInstallConfig) PluginAutoInstallProxyURL() string {{
-\tif cfg == nil {{
-\t\treturn ""
-\t}}
-\treturn cfg.ProxyURL
-}}
-
-func (cfg *fakeAutoInstallConfig) PluginAutoInstallEnabled() bool {{
-\treturn cfg != nil && cfg.Enabled
-}}
-
-func (cfg *fakeAutoInstallConfig) PluginAutoInstallDir() string {{
-\tif cfg == nil {{
-\t\treturn ""
-\t}}
-\treturn cfg.Dir
-}}
-
-func (cfg *fakeAutoInstallConfig) PluginAutoInstallStoreSources() []string {{
-\tif cfg == nil || len(cfg.StoreSources) == 0 {{
-\t\treturn nil
-\t}}
-\treturn append([]string(nil), cfg.StoreSources...)
-}}
-
-func (cfg *fakeAutoInstallConfig) PluginAutoInstallEnabledIDs() []string {{
-\tif cfg == nil || len(cfg.Configs) == 0 {{
-\t\treturn nil
-\t}}
-\tids := make([]string, 0, len(cfg.Configs))
-\tfor id, item := range cfg.Configs {{
-\t\tif item.Enabled == nil || !*item.Enabled {{
-\t\t\tcontinue
-\t\t}}
-\t\tids = append(ids, id)
-\t}}
-\tsort.Strings(ids)
-\treturn ids
-}}
-
-func TestEnsureConfiguredPluginsInstalledSkipsDisabledGlobal(t *testing.T) {{
-\tcfg := &fakeAutoInstallConfig{{
-\t\tEnabled: false,
-\t\tDir: t.TempDir(),
-\t\tConfigs: map[string]fakeAutoInstallPlugin{{
-\t\t\t"sample-provider": {{Enabled: enabledBoolPtr(true)}},
-\t\t}},
-\t}}
-\tcalled := false
-\treport := ensureConfiguredPluginsInstalled(context.Background(), cfg, autoInstallOptions{{
-\t\tInstall: func(context.Context, Client, Plugin, InstallOptions) (InstallResult, error) {{
-\t\t\tcalled = true
-\t\t\treturn InstallResult{{}}, nil
-\t\t}},
-\t}})
-\tif called {{
-\t\tt.Fatal("installer called while plugins are globally disabled")
-\t}}
-\tif len(report.Installed) != 0 || len(report.Warnings) != 0 {{
-\t\tt.Fatalf("report = %#v, want empty", report)
-\t}}
-}}
-
-func TestEnsureConfiguredPluginsInstalledSkipsDisabledPlugin(t *testing.T) {{
-\tcfg := &fakeAutoInstallConfig{{
-\t\tEnabled: true,
-\t\tDir: t.TempDir(),
-\t\tConfigs: map[string]fakeAutoInstallPlugin{{
-\t\t\t"sample-provider": {{Enabled: enabledBoolPtr(false)}},
-\t\t}},
-\t}}
-\tcalled := false
-\treport := ensureConfiguredPluginsInstalled(context.Background(), cfg, autoInstallOptions{{
-\t\tInstall: func(context.Context, Client, Plugin, InstallOptions) (InstallResult, error) {{
-\t\t\tcalled = true
-\t\t\treturn InstallResult{{}}, nil
-\t\t}},
-\t}})
-\tif called {{
-\t\tt.Fatal("installer called for disabled plugin")
-\t}}
-\tif len(report.Installed) != 0 || len(report.Warnings) != 0 {{
-\t\tt.Fatalf("report = %#v, want empty", report)
-\t}}
-}}
-
-func TestEnsureConfiguredPluginsInstalledSkipsInstalledPlugin(t *testing.T) {{
-\troot := t.TempDir()
-\ttargetDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
-\tif err := os.MkdirAll(targetDir, 0o755); err != nil {{
-\t\tt.Fatalf("MkdirAll() error = %v", err)
-\t}}
-\tif err := os.WriteFile(filepath.Join(targetDir, "sample-provider"+autoInstallPluginExtension(runtime.GOOS)), []byte("plugin"), 0o755); err != nil {{
-\t\tt.Fatalf("WriteFile() error = %v", err)
-\t}}
-\tcfg := &fakeAutoInstallConfig{{
-\t\tEnabled: true,
-\t\tDir: root,
-\t\tConfigs: map[string]fakeAutoInstallPlugin{{
-\t\t\t"sample-provider": {{Enabled: enabledBoolPtr(true)}},
-\t\t}},
-\t}}
-\tcalled := false
-\treport := ensureConfiguredPluginsInstalled(context.Background(), cfg, autoInstallOptions{{
-\t\tInstall: func(context.Context, Client, Plugin, InstallOptions) (InstallResult, error) {{
-\t\t\tcalled = true
-\t\t\treturn InstallResult{{}}, nil
-\t\t}},
-\t}})
-\tif called {{
-\t\tt.Fatal("installer called for already installed plugin")
-\t}}
-\tif len(report.Installed) != 0 || len(report.Warnings) != 0 {{
-\t\tt.Fatalf("report = %#v, want empty", report)
-\t}}
-}}
-
-func TestEnsureConfiguredPluginsInstalledInstallsUniqueRegistryMatch(t *testing.T) {{
-\troot := t.TempDir()
-\tcfg := &fakeAutoInstallConfig{{
-\t\tEnabled: true,
-\t\tDir: root,
-\t\tConfigs: map[string]fakeAutoInstallPlugin{{
-\t\t\t"sample-provider": {{Enabled: enabledBoolPtr(true)}},
-\t\t}},
-\t}}
-\tfakeHTTP := autoInstallFakeDoer{{
-\t\tDefaultRegistryURL: `{{"schema_version":1,"plugins":[{{"id":"sample-provider","name":"Sample","description":"Sample plugin","author":"Tester","repository":"https://github.com/example/sample-provider"}}]}}`,
-\t}}
-\tvar gotPlugin Plugin
-\tvar gotOptions InstallOptions
-\treport := ensureConfiguredPluginsInstalled(context.Background(), cfg, autoInstallOptions{{
-\t\tHTTPClient: fakeHTTP,
-\t\tGOOS: "linux",
-\t\tGOARCH: "amd64",
-\t\tInstall: func(_ context.Context, _ Client, plugin Plugin, options InstallOptions) (InstallResult, error) {{
-\t\t\tgotPlugin = plugin
-\t\t\tgotOptions = options
-\t\t\treturn InstallResult{{ID: plugin.ID, Version: "1.2.3", Path: filepath.Join(options.PluginsDir, options.GOOS, options.GOARCH, plugin.ID+".so")}}, nil
-\t\t}},
-\t}})
-\tif len(report.Warnings) != 0 {{
-\t\tt.Fatalf("warnings = %#v, want none", report.Warnings)
-\t}}
-\tif len(report.Installed) != 1 {{
-\t\tt.Fatalf("installed len = %d, want 1; report=%#v", len(report.Installed), report)
-\t}}
-\tif gotPlugin.ID != "sample-provider" {{
-\t\tt.Fatalf("installed plugin = %#v", gotPlugin)
-\t}}
-\tif gotOptions.PluginsDir != root || gotOptions.GOOS != "linux" || gotOptions.GOARCH != "amd64" {{
-\t\tt.Fatalf("install options = %#v", gotOptions)
-\t}}
-}}
-
-func TestEnsureConfiguredPluginsInstalledSkipsAmbiguousRegistryMatch(t *testing.T) {{
-\tsourceURL := "https://plugins.example/registry.json"
-\tcfg := &fakeAutoInstallConfig{{
-\t\tEnabled: true,
-\t\tDir: t.TempDir(),
-\t\tStoreSources: []string{{sourceURL}},
-\t\tConfigs: map[string]fakeAutoInstallPlugin{{
-\t\t\t"sample-provider": {{Enabled: enabledBoolPtr(true)}},
-\t\t}},
-\t}}
-\tregistry := `{{"schema_version":1,"plugins":[{{"id":"sample-provider","name":"Sample","description":"Sample plugin","author":"Tester","repository":"https://github.com/example/sample-provider"}}]}}`
-\tcalled := false
-\treport := ensureConfiguredPluginsInstalled(context.Background(), cfg, autoInstallOptions{{
-\t\tHTTPClient: autoInstallFakeDoer{{
-\t\t\tDefaultRegistryURL: registry,
-\t\t\tsourceURL: registry,
-\t\t}},
-\t\tInstall: func(context.Context, Client, Plugin, InstallOptions) (InstallResult, error) {{
-\t\t\tcalled = true
-\t\t\treturn InstallResult{{}}, nil
-\t\t}},
-\t}})
-\tif called {{
-\t\tt.Fatal("installer called for ambiguous registry match")
-\t}}
-\tif len(report.Installed) != 0 {{
-\t\tt.Fatalf("installed = %#v, want none", report.Installed)
-\t}}
-\tif len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0].Message, "multiple registries") {{
-\t\tt.Fatalf("warnings = %#v, want ambiguity warning", report.Warnings)
-\t}}
-}}
-''')
+queue_go_source('internal/pluginstore/autoinstall_test.go')
 
 replace_once(
     ROOT / 'internal/pluginhost/auth_provider.go',
@@ -1559,233 +972,9 @@ replace_once(
 ''',
 )
 
-write_text(ROOT / 'internal/pluginhost/gemini_cli_storage_compat.go', '''package pluginhost
+queue_go_source('internal/pluginhost/gemini_cli_storage_compat.go')
 
-import (
-\t"bytes"
-\t"encoding/json"
-\t"strings"
-)
-
-func normalizePluginStorageJSON(provider string, raw []byte) []byte {
-\ttrimmed := bytes.TrimSpace(raw)
-\tif len(trimmed) == 0 {
-\t\treturn nil
-\t}
-\tprovider = normalizeProviderID(provider)
-\tif provider != "gemini-cli" && provider != "gemini" {
-\t\treturn raw
-\t}
-\tvar data map[string]any
-\tif err := json.Unmarshal(trimmed, &data); err != nil || data == nil {
-\t\treturn raw
-\t}
-\tnormalizeGeminiCLIStorageMap(data)
-\tout, err := json.Marshal(data)
-\tif err != nil {
-\t\treturn raw
-\t}
-\treturn out
-}
-
-func pluginAuthDisabledFromMetadata(metadata map[string]any) bool {
-\tif metadata == nil {
-\t\treturn false
-\t}
-\tswitch value := metadata["disabled"].(type) {
-\tcase bool:
-\t\treturn value
-\tcase string:
-\t\tvalue = strings.ToLower(strings.TrimSpace(value))
-\t\treturn value == "true" || value == "1" || value == "yes" || value == "on"
-\tcase float64:
-\t\treturn value != 0
-\tcase int:
-\t\treturn value != 0
-\tcase int64:
-\t\treturn value != 0
-\tcase json.Number:
-\t\tparsed, err := value.Int64()
-\t\treturn err == nil && parsed != 0
-\tdefault:
-\t\treturn false
-\t}
-}
-
-func normalizeGeminiCLIStorageMap(data map[string]any) {
-\tif data == nil {
-\t\treturn
-\t}
-\tif rawType := strings.TrimSpace(stringValue(data["type"])); rawType != "" {
-\t\tproviderType := normalizeProviderID(rawType)
-\t\tif providerType != "gemini-cli" && providerType != "gemini" {
-\t\t\treturn
-\t\t}
-\t}
-\trawToken, ok := data["token"]
-\tif !ok {
-\t\treturn
-\t}
-\tswitch token := rawToken.(type) {
-\tcase map[string]any:
-\t\treturn
-\tcase string:
-\t\ttoken = strings.TrimSpace(token)
-\t\tif token == "" {
-\t\t\tdelete(data, "token")
-\t\t\treturn
-\t\t}
-\t\tvar parsed map[string]any
-\t\tif err := json.Unmarshal([]byte(token), &parsed); err == nil && parsed != nil {
-\t\t\tdata["token"] = parsed
-\t\t\tcopyGeminiCLITokenFields(data, parsed)
-\t\t\treturn
-\t\t}
-\t\tdata["token"] = map[string]any{"access_token": token}
-\t\tif strings.TrimSpace(stringValue(data["access_token"])) == "" {
-\t\t\tdata["access_token"] = token
-\t\t}
-\tdefault:
-\t\tdelete(data, "token")
-\t}
-}
-
-func copyGeminiCLITokenFields(data map[string]any, token map[string]any) {
-\tfor _, key := range []string{"access_token", "refresh_token", "token_type", "expiry", "expires_in", "scope"} {
-\t\tif _, exists := data[key]; exists {
-\t\t\tcontinue
-\t\t}
-\t\tif value, ok := token[key]; ok {
-\t\t\tdata[key] = value
-\t\t}
-\t}
-}
-
-func stringValue(value any) string {
-\tswitch typed := value.(type) {
-\tcase string:
-\t\treturn typed
-\tcase interface{ String() string }:
-\t\treturn typed.String()
-\tdefault:
-\t\treturn ""
-\t}
-}
-''')
-
-write_text(ROOT / 'internal/pluginhost/gemini_cli_storage_compat_test.go', f'''package pluginhost
-
-import (
-\t"context"
-\t"encoding/json"
-\t"testing"
-
-\tcoreauth "{import_path('sdk/cliproxy/auth')}"
-\t"{import_path('sdk/pluginapi')}"
-)
-
-func TestParseAuthNormalizesGeminiCLIStringToken(t *testing.T) {{
-\tvar seen map[string]any
-\thost := newHostWithRecords(capabilityRecord{{
-\t\tid: "geminicli",
-\t\tplugin: pluginapi.Plugin{{
-\t\t\tCapabilities: pluginapi.Capabilities{{
-\t\t\t\tAuthProvider: fakeAuthProvider{{
-\t\t\t\t\tidentifier: "gemini-cli",
-\t\t\t\t\tparseAuth: func(ctx context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {{
-\t\t\t\t\t\tif err := json.Unmarshal(req.RawJSON, &seen); err != nil {{
-\t\t\t\t\t\t\tt.Fatalf("normalized RawJSON is invalid: %v", err)
-\t\t\t\t\t\t}}
-\t\t\t\t\t\treturn pluginapi.AuthParseResponse{{
-\t\t\t\t\t\t\tHandled: true,
-\t\t\t\t\t\t\tAuth: pluginapi.AuthData{{
-\t\t\t\t\t\t\t\tProvider: "gemini-cli",
-\t\t\t\t\t\t\t\tID: "gemini.json",
-\t\t\t\t\t\t\t\tStorageJSON: req.RawJSON,
-\t\t\t\t\t\t\t}},
-\t\t\t\t\t\t}}, nil
-\t\t\t\t\t}},
-\t\t\t\t}},
-\t\t\t}},
-\t\t}},
-\t}})
-\t_, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{{
-\t\tProvider: "gemini-cli",
-\t\tRawJSON: []byte(`{{"type":"gemini-cli","token":"{{\\"access_token\\":\\"access-token\\",\\"refresh_token\\":\\"refresh-token\\"}}","project_id":"project-id"}}`),
-\t}})
-\tif errParse != nil {{
-\t\tt.Fatalf("ParseAuth() error = %v", errParse)
-\t}}
-\tif !handled {{
-\t\tt.Fatal("ParseAuth() handled = false")
-\t}}
-\ttoken, ok := seen["token"].(map[string]any)
-\tif !ok {{
-\t\tt.Fatalf("token = %#v, want object", seen["token"])
-\t}}
-\tif token["access_token"] != "access-token" || seen["access_token"] != "access-token" || seen["refresh_token"] != "refresh-token" {{
-\t\tt.Fatalf("normalized storage = %#v", seen)
-\t}}
-}}
-
-func TestStorageJSONFromAuthNormalizesGeminiCLIRawStringToken(t *testing.T) {{
-\tauth := &coreauth.Auth{{
-\t\tProvider: "gemini-cli",
-\t\tStorage: &pluginTokenStorage{{
-\t\t\tprovider: "gemini-cli",
-\t\t\trawJSON: []byte(`{{"type":"gemini-cli","token":"plain-access-token","project_id":"project-id"}}`),
-\t\t}},
-\t}}
-\tvar data map[string]any
-\tif err := json.Unmarshal(storageJSONFromAuth(auth), &data); err != nil {{
-\t\tt.Fatalf("storageJSONFromAuth() invalid JSON: %v", err)
-\t}}
-\ttoken, ok := data["token"].(map[string]any)
-\tif !ok {{
-\t\tt.Fatalf("token = %#v, want object", data["token"])
-\t}}
-\tif token["access_token"] != "plain-access-token" || data["access_token"] != "plain-access-token" {{
-\t\tt.Fatalf("normalized storage = %#v", data)
-\t}}
-}}
-
-func TestParseAuthRestoresDisabledFromPluginMetadata(t *testing.T) {{
-\thost := newHostWithRecords(capabilityRecord{{
-\t\tid: "geminicli",
-\t\tplugin: pluginapi.Plugin{{
-\t\t\tCapabilities: pluginapi.Capabilities{{
-\t\t\t\tAuthProvider: fakeAuthProvider{{
-\t\t\t\t\tidentifier: "gemini-cli",
-\t\t\t\t\tparseAuth: func(ctx context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {{
-\t\t\t\t\t\treturn pluginapi.AuthParseResponse{{
-\t\t\t\t\t\t\tHandled: true,
-\t\t\t\t\t\t\tAuth: pluginapi.AuthData{{
-\t\t\t\t\t\t\t\tProvider: "gemini-cli",
-\t\t\t\t\t\t\t\tID: "disabled.json",
-\t\t\t\t\t\t\t\tMetadata: map[string]any{{"disabled": true}},
-\t\t\t\t\t\t\t\tStorageJSON: []byte(`{{"type":"gemini-cli","disabled":true}}`),
-\t\t\t\t\t\t\t}},
-\t\t\t\t\t\t}}, nil
-\t\t\t\t\t}},
-\t\t\t\t}},
-\t\t\t}},
-\t\t}},
-\t}})
-\tauth, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{{
-\t\tProvider: "gemini-cli",
-\t\tRawJSON: []byte(`{{"type":"gemini-cli","disabled":true}}`),
-\t}})
-\tif errParse != nil {{
-\t\tt.Fatalf("ParseAuth() error = %v", errParse)
-\t}}
-\tif !handled || auth == nil {{
-\t\tt.Fatalf("ParseAuth() handled=%t auth=%#v, want auth", handled, auth)
-\t}}
-\tif !auth.Disabled || auth.Status != coreauth.StatusDisabled || auth.Metadata["disabled"] != true {{
-\t\tt.Fatalf("auth disabled/status/metadata = %v/%v/%#v, want disabled", auth.Disabled, auth.Status, auth.Metadata["disabled"])
-\t}}
-}}
-''')
+queue_go_source('internal/pluginhost/gemini_cli_storage_compat_test.go')
 
 server = ROOT / 'internal/api/server.go'
 auth_files = ROOT / 'internal/api/handlers/management/auth_files.go'
@@ -1795,12 +984,12 @@ management_scheduler_test = ROOT / 'internal/api/handlers/management/account_ins
 routing_policy = ROOT / 'internal/api/handlers/management/routing_policy.go'
 routing_policy_test = ROOT / 'internal/api/handlers/management/routing_policy_test.go'
 scheduler_source = Path(__file__).resolve().parent / 'account_inspection_scheduler.go'
-write_text(management_scheduler, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(scheduler_source)))
+write(management_scheduler, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(scheduler_source)))
 scheduler_test_source = Path(__file__).resolve().parent / 'account_inspection_scheduler_test.go'
 if scheduler_test_source.is_file():
-    write_text(management_scheduler_test, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(scheduler_test_source)))
-write_text(routing_policy, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'routing_policy.go')))
-write_text(routing_policy_test, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'routing_policy_test.go')))
+    write(management_scheduler_test, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(scheduler_test_source)))
+write(routing_policy, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'routing_policy.go')))
+write(routing_policy_test, re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(Path(__file__).resolve().parent / 'routing_policy_test.go')))
 
 replace_once(
     server,
@@ -2219,19 +1408,16 @@ patch_dir = Path(__file__).resolve().parent
 embeddedusage_source = patch_dir.parent / 'embeddedusage'
 embeddedusage_target = ROOT / 'internal/embeddedusage'
 if embeddedusage_source.is_dir():
-    shutil.copytree(embeddedusage_source, embeddedusage_target, dirs_exist_ok=True)
+    queue_tree(embeddedusage_source, embeddedusage_target)
 elif not embeddedusage_target.is_dir():
     raise SystemExit(f'embeddedusage source not found: {embeddedusage_source}')
 ensure_go_require(ROOT / 'go.mod', 'modernc.org/sqlite', 'v1.51.0')
-for embeddedusage_file in embeddedusage_target.rglob('*.go'):
-    rewrite_module_imports(embeddedusage_file)
-
 auth_runtime_state = ROOT / 'sdk/cliproxy/auth/auth_runtime_state.go'
-write_text(
+write(
     auth_runtime_state,
     re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(patch_dir / 'auth_runtime_state.go')),
 )
-write_text(
+write(
     ROOT / 'sdk/cliproxy/auth/auth_runtime_state_test.go',
     re.sub(r'github\.com/router-for-me/CLIProxyAPI/v\d+', MODULE_PATH, read_text(patch_dir / 'auth_runtime_state_test.go')),
 )
@@ -2274,268 +1460,17 @@ if redisqueue_plugin_test.exists():
         f'"{import_path("internal/requestmeta")}"',
     )
     text = text.replace('internallogging.', 'requestmeta.')
-    write_text(redisqueue_plugin_test, text)
+    write(redisqueue_plugin_test, text)
 
-(ROOT / 'internal/requestmeta').mkdir(parents=True, exist_ok=True)
-write_text(ROOT / 'internal/requestmeta/requestid.go', f'''package requestmeta
+queue_go_source('internal/requestmeta/requestid.go')
 
-import (
-\t"context"
-\t"crypto/rand"
-\t"encoding/hex"
-\t"strings"
-)
-
-type requestIDKey struct{{}}
-
-// GenerateRequestID creates a new 8-character hex request ID.
-func GenerateRequestID() string {{
-\tb := make([]byte, 4)
-\tif _, err := rand.Read(b); err != nil {{
-\t\treturn "00000000"
-\t}}
-\treturn hex.EncodeToString(b)
-}}
-
-// WithRequestID returns a new context with the request ID attached.
-func WithRequestID(ctx context.Context, requestID string) context.Context {{
-\tif ctx == nil {{
-\t\tctx = context.Background()
-\t}}
-\trequestID = strings.TrimSpace(requestID)
-\tif requestID == "" {{
-\t\treturn ctx
-\t}}
-\treturn context.WithValue(ctx, requestIDKey{{}}, requestID)
-}}
-
-// GetRequestID retrieves the request ID from the context.
-func GetRequestID(ctx context.Context) string {{
-\tif ctx == nil {{
-\t\treturn ""
-\t}}
-\tif id, ok := ctx.Value(requestIDKey{{}}).(string); ok {{
-\t\treturn strings.TrimSpace(id)
-\t}}
-\treturn ""
-}}
-''')
-
-write_text(ROOT / 'internal/requestmeta/response.go', f'''package requestmeta
-
-import (
-\t"context"
-\t"net/http"
-\t"strings"
-\t"sync"
-\t"sync/atomic"
-)
-
-type endpointKey struct{{}}
-type responseStatusKey struct{{}}
-type responseHeadersKey struct{{}}
-
-type responseStatusHolder struct {{
-\tstatus atomic.Int32
-}}
-
-type responseHeadersHolder struct {{
-\tmu      sync.RWMutex
-\theaders http.Header
-}}
-
-func WithEndpoint(ctx context.Context, endpoint string) context.Context {{
-\tif ctx == nil {{
-\t\tctx = context.Background()
-\t}}
-\tendpoint = strings.TrimSpace(endpoint)
-\tif endpoint == "" {{
-\t\treturn ctx
-\t}}
-\treturn context.WithValue(ctx, endpointKey{{}}, endpoint)
-}}
-
-func GetEndpoint(ctx context.Context) string {{
-\tif ctx == nil {{
-\t\treturn ""
-\t}}
-\tif endpoint, ok := ctx.Value(endpointKey{{}}).(string); ok {{
-\t\treturn strings.TrimSpace(endpoint)
-\t}}
-\treturn ""
-}}
-
-func WithResponseStatusHolder(ctx context.Context) context.Context {{
-\tif ctx == nil {{
-\t\tctx = context.Background()
-\t}}
-\tif holder, ok := ctx.Value(responseStatusKey{{}}).(*responseStatusHolder); ok && holder != nil {{
-\t\treturn ctx
-\t}}
-\treturn context.WithValue(ctx, responseStatusKey{{}}, &responseStatusHolder{{}})
-}}
-
-func WithResponseHeadersHolder(ctx context.Context) context.Context {{
-\tif ctx == nil {{
-\t\tctx = context.Background()
-\t}}
-\tif holder, ok := ctx.Value(responseHeadersKey{{}}).(*responseHeadersHolder); ok && holder != nil {{
-\t\treturn ctx
-\t}}
-\treturn context.WithValue(ctx, responseHeadersKey{{}}, &responseHeadersHolder{{}})
-}}
-
-func SetResponseStatus(ctx context.Context, status int) {{
-\tif ctx == nil || status <= 0 {{
-\t\treturn
-\t}}
-\tholder, ok := ctx.Value(responseStatusKey{{}}).(*responseStatusHolder)
-\tif !ok || holder == nil {{
-\t\treturn
-\t}}
-\tholder.status.Store(int32(status))
-}}
-
-func SetResponseHeaders(ctx context.Context, headers http.Header) {{
-\tif ctx == nil {{
-\t\treturn
-\t}}
-\tholder, ok := ctx.Value(responseHeadersKey{{}}).(*responseHeadersHolder)
-\tif !ok || holder == nil {{
-\t\treturn
-\t}}
-\tholder.mu.Lock()
-\tdefer holder.mu.Unlock()
-\tholder.headers = cloneHTTPHeader(headers)
-}}
-
-func GetResponseStatus(ctx context.Context) int {{
-\tif ctx == nil {{
-\t\treturn 0
-\t}}
-\tholder, ok := ctx.Value(responseStatusKey{{}}).(*responseStatusHolder)
-\tif !ok || holder == nil {{
-\t\treturn 0
-\t}}
-\treturn int(holder.status.Load())
-}}
-
-func GetResponseHeaders(ctx context.Context) http.Header {{
-\tif ctx == nil {{
-\t\treturn nil
-\t}}
-\tholder, ok := ctx.Value(responseHeadersKey{{}}).(*responseHeadersHolder)
-\tif !ok || holder == nil {{
-\t\treturn nil
-\t}}
-\tholder.mu.RLock()
-\tdefer holder.mu.RUnlock()
-\treturn cloneHTTPHeader(holder.headers)
-}}
-
-func cloneHTTPHeader(src http.Header) http.Header {{
-\tif len(src) == 0 {{
-\t\treturn nil
-\t}}
-\tdst := make(http.Header, len(src))
-\tfor key, values := range src {{
-\t\tdst[key] = append([]string(nil), values...)
-\t}}
-\treturn dst
-}}
-''')
+queue_go_source('internal/requestmeta/response.go')
 
 logging_request_id = ROOT / 'internal/logging/requestid.go'
-write_text(logging_request_id, f'''package logging
-
-import (
-\t"context"
-
-\t"github.com/gin-gonic/gin"
-\t"{import_path('internal/requestmeta')}"
-)
-
-// ginRequestIDKey is the Gin context key for request IDs.
-const ginRequestIDKey = "__request_id__"
-
-// GenerateRequestID creates a new 8-character hex request ID.
-func GenerateRequestID() string {{
-\treturn requestmeta.GenerateRequestID()
-}}
-
-// WithRequestID returns a new context with the request ID attached.
-func WithRequestID(ctx context.Context, requestID string) context.Context {{
-\treturn requestmeta.WithRequestID(ctx, requestID)
-}}
-
-// GetRequestID retrieves the request ID from the context.
-func GetRequestID(ctx context.Context) string {{
-\treturn requestmeta.GetRequestID(ctx)
-}}
-
-// SetGinRequestID stores the request ID in the Gin context.
-func SetGinRequestID(c *gin.Context, requestID string) {{
-\tif c != nil {{
-\t\tc.Set(ginRequestIDKey, requestID)
-\t}}
-}}
-
-// GetGinRequestID retrieves the request ID from the Gin context.
-func GetGinRequestID(c *gin.Context) string {{
-\tif c == nil {{
-\t\treturn ""
-\t}}
-\tif id, exists := c.Get(ginRequestIDKey); exists {{
-\t\tif s, ok := id.(string); ok {{
-\t\t\treturn s
-\t\t}}
-\t}}
-\treturn ""
-}}
-''')
+queue_go_source('internal/logging/requestid.go')
 
 logging_request_meta = ROOT / 'internal/logging/requestmeta.go'
-write_text(logging_request_meta, f'''package logging
-
-import (
-\t"context"
-\t"net/http"
-
-\t"{import_path('internal/requestmeta')}"
-)
-
-func WithEndpoint(ctx context.Context, endpoint string) context.Context {{
-\treturn requestmeta.WithEndpoint(ctx, endpoint)
-}}
-
-func GetEndpoint(ctx context.Context) string {{
-\treturn requestmeta.GetEndpoint(ctx)
-}}
-
-func WithResponseStatusHolder(ctx context.Context) context.Context {{
-\treturn requestmeta.WithResponseStatusHolder(ctx)
-}}
-
-func WithResponseHeadersHolder(ctx context.Context) context.Context {{
-\treturn requestmeta.WithResponseHeadersHolder(ctx)
-}}
-
-func SetResponseStatus(ctx context.Context, status int) {{
-\trequestmeta.SetResponseStatus(ctx, status)
-}}
-
-func SetResponseHeaders(ctx context.Context, headers http.Header) {{
-\trequestmeta.SetResponseHeaders(ctx, headers)
-}}
-
-func GetResponseStatus(ctx context.Context) int {{
-\treturn requestmeta.GetResponseStatus(ctx)
-}}
-
-func GetResponseHeaders(ctx context.Context) http.Header {{
-\treturn requestmeta.GetResponseHeaders(ctx)
-}}
-''')
+queue_go_source('internal/logging/requestmeta.go')
 
 add_go_import(server, '"' + import_path('internal/config') + '"\n', '\t"' + import_path('internal/embeddedusage') + '"\n')
 
@@ -2741,202 +1676,7 @@ insert_before_nth(
     'embeddedusage.Start(runCtx)',
 )
 
-write_text(ROOT / 'sdk/cliproxy/auth/inspection_refresh.go', '''package auth
-
-import (
-	"context"
-	"errors"
-	"strings"
-	"time"
-)
-
-func (m *Manager) shouldRefreshForInspection(a *Auth, now time.Time) bool {
-	if a == nil {
-		return false
-	}
-	if hasUnauthorizedAuthFailure(a) {
-		return false
-	}
-	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
-		return false
-	}
-	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
-		return evaluator.ShouldRefresh(now, a)
-	}
-
-	lastRefresh := a.LastRefreshedAt
-	if lastRefresh.IsZero() {
-		if ts, ok := authLastRefreshTimestamp(a); ok {
-			lastRefresh = ts
-		}
-	}
-
-	expiry, hasExpiry := a.ExpirationTime()
-
-	if interval := authPreferredInterval(a); interval > 0 {
-		if hasExpiry && !expiry.IsZero() {
-			if !expiry.After(now) {
-				return true
-			}
-			if expiry.Sub(now) <= interval {
-				return true
-			}
-		}
-		if lastRefresh.IsZero() {
-			return true
-		}
-		return now.Sub(lastRefresh) >= interval
-	}
-
-	provider := strings.ToLower(a.Provider)
-	lead := ProviderRefreshLead(provider, a.Runtime)
-	if lead == nil {
-		return false
-	}
-	if *lead <= 0 {
-		if hasExpiry && !expiry.IsZero() {
-			return now.After(expiry)
-		}
-		return false
-	}
-	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
-	}
-	if !lastRefresh.IsZero() {
-		return now.Sub(lastRefresh) >= *lead
-	}
-	return true
-}
-
-func (m *Manager) markRefreshPendingForInspection(id string, now time.Time, force bool) bool {
-	m.mu.Lock()
-	auth, ok := m.auths[id]
-	if !ok || auth == nil {
-		m.mu.Unlock()
-		return false
-	}
-	if !force && !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
-		m.mu.Unlock()
-		return false
-	}
-	auth.NextRefreshAfter = now.Add(refreshPendingBackoff)
-	m.auths[id] = auth
-	m.mu.Unlock()
-
-	m.queueRefreshReschedule(id)
-	return true
-}
-
-func (m *Manager) RefreshIfDueForInspection(ctx context.Context, id string) (*Auth, bool, error) {
-	return m.refreshForInspection(ctx, id, false)
-}
-
-func (m *Manager) ForceRefreshForInspection(ctx context.Context, id string) (*Auth, bool, error) {
-	return m.refreshForInspection(ctx, id, true)
-}
-
-func (m *Manager) refreshForInspection(ctx context.Context, id string, force bool) (*Auth, bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	now := time.Now()
-	m.mu.RLock()
-	auth := m.auths[id]
-	if auth == nil {
-		m.mu.RUnlock()
-		return nil, false, nil
-	}
-	current := auth.Clone()
-	accountType, _ := auth.AccountInfo()
-	if accountType == "api_key" || (!force && !m.shouldRefreshForInspection(auth, now)) {
-		m.mu.RUnlock()
-		return current, false, nil
-	}
-	exec := m.executors[auth.Provider]
-	m.mu.RUnlock()
-	if exec == nil {
-		return current, false, nil
-	}
-	if !m.markRefreshPendingForInspection(id, now, force) {
-		m.mu.RLock()
-		defer m.mu.RUnlock()
-		if latest := m.auths[id]; latest != nil {
-			return latest.Clone(), false, nil
-		}
-		return nil, false, nil
-	}
-
-	m.mu.RLock()
-	auth = m.auths[id]
-	if auth == nil {
-		m.mu.RUnlock()
-		return nil, false, nil
-	}
-	exec = m.executors[auth.Provider]
-	cloned := auth.Clone()
-	preservedDisabled := auth.Disabled
-	preservedStatus := auth.Status
-	preservedStatusMessage := auth.StatusMessage
-	m.mu.RUnlock()
-	if exec == nil {
-		return cloned, false, nil
-	}
-
-	updated, err := exec.Refresh(ctx, cloned)
-	if err != nil && errors.Is(err, context.Canceled) {
-		return cloned, false, err
-	}
-	now = time.Now()
-	if err != nil {
-		unauthorized := isUnauthorizedError(err)
-		m.mu.Lock()
-		if current := m.auths[id]; current != nil {
-			current.LastError = refreshErrorFromError(err)
-			if unauthorized {
-				current.NextRefreshAfter = time.Time{}
-				current.Unavailable = true
-				current.Status = StatusError
-				current.StatusMessage = "unauthorized"
-			} else {
-				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
-			}
-			m.auths[id] = current
-			if m.scheduler != nil {
-				m.scheduler.upsertAuth(current.Clone())
-			}
-		}
-		m.mu.Unlock()
-		m.queueRefreshReschedule(id)
-		return cloned, false, err
-	}
-	if updated == nil {
-		updated = cloned
-	}
-	if updated.Runtime == nil {
-		updated.Runtime = auth.Runtime
-	}
-	updated.Disabled = preservedDisabled
-	if preservedDisabled {
-		updated.Status = preservedStatus
-		updated.StatusMessage = preservedStatusMessage
-	}
-	updated.LastRefreshedAt = now
-	updated.NextRefreshAfter = time.Time{}
-	updated.LastError = nil
-	if updated.Metadata != nil {
-		delete(updated.Metadata, "last_error")
-	}
-	updated.UpdatedAt = now
-	if m.shouldRefreshForInspection(updated, now) {
-		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
-	}
-	saved, err := m.Update(ctx, updated)
-	if err != nil {
-		return updated, false, err
-	}
-	return saved, true, nil
-}
-''')
+queue_go_source('sdk/cliproxy/auth/inspection_refresh.go')
 
 auth_types = ROOT / 'sdk/cliproxy/auth/types.go'
 replace_once(
