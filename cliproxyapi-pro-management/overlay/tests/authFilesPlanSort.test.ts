@@ -72,17 +72,29 @@ describe('auth-file plan sorting', () => {
     expect(items.map((item) => item.name)).toEqual(['ultra.json', 'standard.json']);
   });
 
-  test('maps xAI monthly limits to SuperGrok tiers', () => {
-    const items = [file('supergrok.json', 'xai'), file('heavy.json', 'xai')];
+  test('maps xAI monthly limits to all known tiers', () => {
+    const items = [
+      file('free.json', 'xai'),
+      file('supergrok.json', 'xai'),
+      file('premium-plus.json', 'xai'),
+      file('heavy.json', 'xai'),
+    ];
     const store = quotaStore({
       xaiQuota: {
+        'free.json': { billing: { monthlyLimitCents: null, planType: 'free' } },
         'supergrok.json': { billing: { monthlyLimitCents: 15_000 } },
+        'premium-plus.json': { billing: { monthlyLimitCents: 20_000 } },
         'heavy.json': { billing: { monthlyLimitCents: 150_000 } },
       },
     } as unknown as Partial<PlanSortQuotaStore>);
 
     items.sort((left, right) => compareAuthFilesByPlanDescending(left, right, store));
 
-    expect(items.map((item) => item.name)).toEqual(['heavy.json', 'supergrok.json']);
+    expect(items.map((item) => item.name)).toEqual([
+      'heavy.json',
+      'premium-plus.json',
+      'supergrok.json',
+      'free.json',
+    ]);
   });
 });

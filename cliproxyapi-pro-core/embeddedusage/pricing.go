@@ -215,7 +215,11 @@ func maxPricingInt64(left, right int64) int64 {
 }
 
 func (s *Store) activeModelPriceRules(ctx context.Context, preserveProvider bool) ([]ModelPriceRule, error) {
-	rows, err := s.db.QueryContext(ctx, `select v.id, a.provider, a.model, v.rule_json, a.source, a.source_provider, a.source_model,
+	return activeModelPriceRulesFrom(ctx, s.db, preserveProvider)
+}
+
+func activeModelPriceRulesFrom(ctx context.Context, queryer sqlQueryer, preserveProvider bool) ([]ModelPriceRule, error) {
+	rows, err := queryer.QueryContext(ctx, `select v.id, a.provider, a.model, v.rule_json, a.source, a.source_provider, a.source_model,
 		a.locked, a.active_version, v.effective_from_ms, a.fetched_at_ms, a.upstream_updated, a.updated_at_ms
 		from model_price_rules a join model_price_rule_versions v
 		on v.provider = a.provider and v.model = a.model and v.version = a.active_version
@@ -373,20 +377,24 @@ func (s *Store) UpsertModelPriceRule(ctx context.Context, rule ModelPriceRule, a
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var currentVersion int
 	var currentLocked int
 	var currentRaw string
-	err = tx.QueryRowContext(ctx, `select a.active_version, a.locked, v.rule_json
+	err = tx.QueryRowContext(ctx, `select a.locked, v.rule_json
 		from model_price_rules a join model_price_rule_versions v
 		on v.provider = a.provider and v.model = a.model and v.version = a.active_version
-		where a.provider = ? and a.model = ?`, rule.Provider, rule.Model).Scan(&currentVersion, &currentLocked, &currentRaw)
+		where a.provider = ? and a.model = ?`, rule.Provider, rule.Model).Scan(&currentLocked, &currentRaw)
 	if err != nil && err != sql.ErrNoRows {
 		return ModelPriceRule{}, false, err
 	}
 	if currentLocked != 0 && rule.Source == modelPriceSourceModelsDev && !allowLockedOverride {
 		return ModelPriceRule{}, false, nil
 	}
-	rule.Version = currentVersion + 1
+	var latestVersion int
+	if err := tx.QueryRowContext(ctx, `select coalesce(max(version), 0) from model_price_rule_versions where provider = ? and model = ?`,
+		rule.Provider, rule.Model).Scan(&latestVersion); err != nil {
+		return ModelPriceRule{}, false, err
+	}
+	rule.Version = latestVersion + 1
 	rule.ID = 0
 	rule.UpdatedAt = time.Now().UnixMilli()
 	raw, err := json.Marshal(rule)

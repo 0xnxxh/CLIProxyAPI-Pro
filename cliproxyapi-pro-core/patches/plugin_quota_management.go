@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/embeddedusage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -37,37 +40,14 @@ func (h *Handler) FetchPluginQuota(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	host := h.pluginHost
-	manager := h.authManager
-	h.mu.Unlock()
-	if host == nil || manager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "plugin quota service unavailable"})
-		return
-	}
 	auth := h.authByIndex(authIndex)
 	if auth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
 		return
 	}
-	previous := loadPluginQuotaSnapshot(c, auth.Provider, auth.FileName, auth.Index)
-	result := host.FetchQuota(c.Request.Context(), auth, previous)
-	if !result.Handled {
-		c.JSON(http.StatusNotFound, gin.H{"error": "quota provider not found"})
-		return
-	}
-	if result.Err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "quota fetch failed", "message": result.Err.Error()})
-		return
-	}
-	if result.Auth != nil {
-		if _, errUpdate := manager.Update(c.Request.Context(), result.Auth); errUpdate != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "auth update failed", "message": errUpdate.Error()})
-			return
-		}
-	}
-	if errPersist := persistPluginQuotaSnapshot(c, auth.Provider, auth.FileName, auth.Index, result.Snapshot); errPersist != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota persistence failed", "message": errPersist.Error()})
+	result, statusCode, errorLabel, errFetch := h.fetchAndPersistPluginQuota(c.Request.Context(), auth)
+	if errFetch != nil {
+		c.JSON(statusCode, gin.H{"error": errorLabel, "message": errFetch.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -77,8 +57,42 @@ func (h *Handler) FetchPluginQuota(c *gin.Context) {
 	})
 }
 
-func loadPluginQuotaSnapshot(c *gin.Context, provider, fileName, authIndex string) *pluginapi.QuotaSnapshot {
-	entries, errGet := embeddedusage.GetQuotaCache(c.Request.Context(), provider, quotaFileName(fileName, authIndex))
+func (h *Handler) fetchAndPersistPluginQuota(ctx context.Context, auth *coreauth.Auth) (pluginhost.QuotaResult, int, string, error) {
+	if h == nil || auth == nil {
+		return pluginhost.QuotaResult{}, http.StatusServiceUnavailable, "plugin quota service unavailable", fmt.Errorf("plugin quota service unavailable")
+	}
+	h.mu.Lock()
+	host := h.pluginHost
+	manager := h.authManager
+	h.mu.Unlock()
+	if host == nil || manager == nil {
+		return pluginhost.QuotaResult{}, http.StatusServiceUnavailable, "plugin quota service unavailable", fmt.Errorf("plugin quota service unavailable")
+	}
+	previous := loadPluginQuotaSnapshot(ctx, auth.Provider, auth.FileName, auth.Index)
+	result := host.FetchQuota(ctx, auth, previous)
+	if !result.Handled {
+		return result, http.StatusNotFound, "quota provider not found", fmt.Errorf("quota provider not found")
+	}
+	if result.Err != nil {
+		return result, http.StatusBadGateway, "quota fetch failed", result.Err
+	}
+	if result.Auth != nil {
+		updated, errUpdate := manager.Update(ctx, result.Auth)
+		if errUpdate != nil {
+			return result, http.StatusInternalServerError, "auth update failed", fmt.Errorf("auth update failed: %w", errUpdate)
+		}
+		if updated == nil {
+			return result, http.StatusConflict, "auth update target no longer exists", fmt.Errorf("auth update target no longer exists")
+		}
+	}
+	if errPersist := persistPluginQuotaSnapshot(ctx, auth.Provider, auth.FileName, auth.Index, result.Snapshot); errPersist != nil {
+		return result, http.StatusInternalServerError, "quota persistence failed", fmt.Errorf("quota persistence failed: %w", errPersist)
+	}
+	return result, http.StatusOK, "", nil
+}
+
+func loadPluginQuotaSnapshot(ctx context.Context, provider, fileName, authIndex string) *pluginapi.QuotaSnapshot {
+	entries, errGet := embeddedusage.GetQuotaCache(ctx, provider, quotaFileName(fileName, authIndex))
 	if errGet != nil {
 		return nil
 	}
@@ -94,7 +108,7 @@ func loadPluginQuotaSnapshot(c *gin.Context, provider, fileName, authIndex strin
 	return nil
 }
 
-func persistPluginQuotaSnapshot(c *gin.Context, provider, fileName, authIndex string, snapshot pluginapi.QuotaSnapshot) error {
+func persistPluginQuotaSnapshot(ctx context.Context, provider, fileName, authIndex string, snapshot pluginapi.QuotaSnapshot) error {
 	raw, errMarshal := json.Marshal(snapshot)
 	if errMarshal != nil {
 		return fmt.Errorf("marshal quota snapshot: %w", errMarshal)
@@ -107,7 +121,7 @@ func persistPluginQuotaSnapshot(c *gin.Context, provider, fileName, authIndex st
 	provider = strings.TrimSpace(provider)
 	fileName = quotaFileName(fileName, authIndex)
 	fingerprint := sha256.Sum256([]byte(strings.ToLower(provider + "|" + authIndex)))
-	return embeddedusage.SetQuotaCache(c.Request.Context(), embeddedusage.QuotaCacheEntry{
+	return embeddedusage.SetQuotaCache(ctx, embeddedusage.QuotaCacheEntry{
 		ID:                  "quota-provider:" + provider + ":" + authIndex,
 		Provider:            provider,
 		FileName:            fileName,

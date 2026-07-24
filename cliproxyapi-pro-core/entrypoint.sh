@@ -67,12 +67,17 @@ if [ -n "$WEBDAV_URL" ] && [ -n "$WEBDAV_USERNAME" ] && [ -n "$WEBDAV_PASSWORD" 
                 "$WEBDAV_URL/$LATEST_FILE" -o /tmp/usage-restore.jsonl
 
             if [ -f /tmp/usage-restore.jsonl ]; then
+                IMPORT_URL="http://127.0.0.1:8317/v0/management/usage/import?allow_legacy=1"
+                if ! awk 'NF { print; exit }' /tmp/usage-restore.jsonl | \
+                    grep -Eq '"record_type"[[:space:]]*:[[:space:]]*"backup_manifest"'; then
+                    log "UsageRestore" "WARN" "Importing manifest-free legacy backup without integrity verification during the compatibility transition."
+                fi
                 log "UsageRestore" "INFO" "Importing usage data..."
                 RESULT=$(curl -s -X POST \
                     -H "Content-Type: application/x-ndjson" \
                     -H "Authorization: Bearer $MANAGEMENT_PASSWORD" \
                     --data-binary @/tmp/usage-restore.jsonl \
-                    http://127.0.0.1:8317/v0/management/usage/import)
+                    "$IMPORT_URL")
                 log "UsageRestore" "INFO" "Import result: $RESULT"
                 rm -f /tmp/usage-restore.jsonl
             else

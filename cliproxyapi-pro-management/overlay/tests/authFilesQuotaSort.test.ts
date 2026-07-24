@@ -135,6 +135,35 @@ describe('auth-file available-quota sorting', () => {
     expect(resolveAuthFileAvailablePercent(product, store)).toBe(35);
   });
 
+  test('uses rolling free-token quota only for free xAI plans', () => {
+    const free = file('free.json', 'xai');
+    const paid = file('paid.json', 'xai');
+    const store = quotaStore({
+      xaiQuota: {
+        'free.json': {
+          status: 'success',
+          cachedAt: Date.now(),
+          billing: {
+            planType: 'free',
+            freeQuota: { usedTokens: 25, limitTokens: 100 },
+          },
+        },
+        'paid.json': {
+          status: 'success',
+          cachedAt: Date.now(),
+          billing: {
+            planType: 'x-premium-plus',
+            freeQuota: { exhausted: true },
+            usagePercent: 10,
+          },
+        },
+      },
+    } as unknown as Partial<QuotaSortStore>);
+
+    expect(resolveAuthFileAvailablePercent(free, store)).toBe(75);
+    expect(resolveAuthFileAvailablePercent(paid, store)).toBe(90);
+  });
+
   test('ignores stale successful quota snapshots', () => {
     const stale = file('stale.json', 'codex');
     const store = quotaStore({

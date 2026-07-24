@@ -1,0 +1,183 @@
+name: Validate CLIProxyAPI Pro
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  resolve-upstream:
+    runs-on: ubuntu-latest
+
+    outputs:
+      core_repo: ${{ steps.resolve.outputs.core_repo }}
+      core_tag: ${{ steps.resolve.outputs.core_tag }}
+      core_sha: ${{ steps.resolve.outputs.core_sha }}
+      core_source_date_epoch: ${{ steps.resolve.outputs.core_source_date_epoch }}
+      management_repo: ${{ steps.resolve.outputs.management_repo }}
+      management_tag: ${{ steps.resolve.outputs.management_tag }}
+      management_sha: ${{ steps.resolve.outputs.management_sha }}
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve upstream versions
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CORE_UPSTREAM_REPO: router-for-me/CLIProxyAPI
+          MANAGEMENT_UPSTREAM_REPO: router-for-me/Cli-Proxy-API-Management-Center
+        run: |
+          set -euo pipefail
+          core_tag="$(gh api "repos/${CORE_UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+          management_tag="$(gh api "repos/${MANAGEMENT_UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+          core_sha="$(gh api "repos/${CORE_UPSTREAM_REPO}/commits/${core_tag}" --jq '.sha')"
+          core_commit_date="$(gh api "repos/${CORE_UPSTREAM_REPO}/commits/${core_sha}" --jq '.commit.committer.date')"
+          core_source_date_epoch="$(date -u -d "${core_commit_date}" +%s)"
+          management_sha="$(gh api "repos/${MANAGEMENT_UPSTREAM_REPO}/commits/${management_tag}" --jq '.sha')"
+
+          echo "core_repo=${CORE_UPSTREAM_REPO}" >> "${GITHUB_OUTPUT}"
+          echo "core_tag=${core_tag}" >> "${GITHUB_OUTPUT}"
+          echo "core_sha=${core_sha}" >> "${GITHUB_OUTPUT}"
+          echo "core_source_date_epoch=${core_source_date_epoch}" >> "${GITHUB_OUTPUT}"
+          echo "management_repo=${MANAGEMENT_UPSTREAM_REPO}" >> "${GITHUB_OUTPUT}"
+          echo "management_tag=${management_tag}" >> "${GITHUB_OUTPUT}"
+          echo "management_sha=${management_sha}" >> "${GITHUB_OUTPUT}"
+
+  repo-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Set up Go for actionlint
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install actionlint
+        env:
+          GOBIN: ${{ runner.temp }}/validation-bin
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "${GOBIN}" >> "${GITHUB_PATH}"
+
+      - name: Validate repository sources
+        env:
+          VALIDATION_REQUIRE_TOOLS: "1"
+        run: bash scripts/validation/repo.sh
+
+  core-baseline:
+    needs: resolve-upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: customizations-repo
+
+      - name: Checkout Core upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.resolve-upstream.outputs.core_repo }}
+          ref: ${{ needs.resolve-upstream.outputs.core_sha }}
+          path: upstream-core
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: upstream-core/go.mod
+          cache-dependency-path: upstream-core/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Validate Core customization
+        env:
+          VALIDATION_RACE: "1"
+        run: bash customizations-repo/scripts/validation/core.sh upstream-core
+
+  source-image-build:
+    needs: resolve-upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build source Dockerfile
+        env:
+          CORE_TAG: ${{ needs.resolve-upstream.outputs.core_tag }}
+          CORE_SHA: ${{ needs.resolve-upstream.outputs.core_sha }}
+          CORE_SOURCE_DATE_EPOCH: ${{ needs.resolve-upstream.outputs.core_source_date_epoch }}
+        run: |
+          customization_source_date_epoch="$(git show -s --format=%ct HEAD)"
+          source_date_epoch="$(printf '%s\n' "${CORE_SOURCE_DATE_EPOCH}" "${customization_source_date_epoch}" | sort -n | tail -n 1)"
+          docker build \
+            --build-arg "CLIPROXY_VERSION=${CORE_TAG}" \
+            --build-arg "CLIPROXY_COMMIT=${CORE_SHA}" \
+            --build-arg "CLIPROXY_BUILD_VERSION=${CORE_TAG}-pro-review" \
+            --build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}" \
+            --tag cli-proxy-api-pro:review \
+            cliproxyapi-pro-core
+
+  management-baseline:
+    needs: resolve-upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: customizations-repo
+
+      - name: Checkout Management upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.resolve-upstream.outputs.management_repo }}
+          ref: ${{ needs.resolve-upstream.outputs.management_sha }}
+          path: upstream-management
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: upstream-management/package.json
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('upstream-management/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Validate Management customization
+        env:
+          VERSION: ${{ needs.resolve-upstream.outputs.management_tag }}-pro-review
+        run: bash customizations-repo/scripts/validation/management.sh upstream-management

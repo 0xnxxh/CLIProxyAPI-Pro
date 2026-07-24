@@ -18,11 +18,14 @@ jobs:
     outputs:
       should_release: ${{ steps.compare.outputs.should_release }}
       core_tag: ${{ steps.compare.outputs.core_tag }}
+      core_sha: ${{ steps.compare.outputs.core_sha }}
       core_version: ${{ steps.compare.outputs.core_version }}
       release_tag: ${{ steps.compare.outputs.release_tag }}
       release_version: ${{ steps.compare.outputs.release_version }}
       management_tag: ${{ steps.compare.outputs.management_tag }}
+      management_sha: ${{ steps.compare.outputs.management_sha }}
       management_version: ${{ steps.compare.outputs.management_version }}
+      models_sha: ${{ steps.compare.outputs.models_sha }}
 
     steps:
       - name: Compare latest core release
@@ -32,6 +35,7 @@ jobs:
           CURRENT_REPO: ${{ github.repository }}
           CORE_UPSTREAM_REPO: router-for-me/CLIProxyAPI
           MANAGEMENT_UPSTREAM_REPO: router-for-me/Cli-Proxy-API-Management-Center
+          MODELS_REPO: router-for-me/models
         run: |
           set -euo pipefail
 
@@ -56,6 +60,9 @@ jobs:
 
           core_tag="$(gh release view --repo "${CORE_UPSTREAM_REPO}" --json tagName --jq '.tagName')"
           management_tag="$(gh release view --repo "${MANAGEMENT_UPSTREAM_REPO}" --json tagName --jq '.tagName')"
+          models_sha="$(gh api "repos/${MODELS_REPO}/commits/main" --jq '.sha')"
+          core_sha="$(gh api "repos/${CORE_UPSTREAM_REPO}/commits/${core_tag}" --jq '.sha')"
+          management_sha="$(gh api "repos/${MANAGEMENT_UPSTREAM_REPO}/commits/${management_tag}" --jq '.sha')"
           current_tag="$(gh release view --repo "${CURRENT_REPO}" --json tagName --jq '.tagName' 2>/dev/null || true)"
 
           core_version="$(normalize_version "${core_tag}")"
@@ -86,19 +93,136 @@ jobs:
           echo "current_version=${current_version}"
           echo "core_tag=${core_tag}"
           echo "core_version=${core_version}"
+          echo "core_sha=${core_sha}"
           echo "management_tag=${management_tag}"
           echo "management_version=${management_version}"
+          echo "management_sha=${management_sha}"
+          echo "models_sha=${models_sha}"
           echo "release_tag=${release_tag}"
           echo "release_version=${release_version}"
           echo "should_release=${should_release}"
 
           echo "core_tag=${core_tag}" >> "${GITHUB_OUTPUT}"
+          echo "core_sha=${core_sha}" >> "${GITHUB_OUTPUT}"
           echo "core_version=${core_version}" >> "${GITHUB_OUTPUT}"
           echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
           echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
           echo "management_tag=${management_tag}" >> "${GITHUB_OUTPUT}"
+          echo "management_sha=${management_sha}" >> "${GITHUB_OUTPUT}"
           echo "management_version=${management_version}" >> "${GITHUB_OUTPUT}"
+          echo "models_sha=${models_sha}" >> "${GITHUB_OUTPUT}"
           echo "should_release=${should_release}" >> "${GITHUB_OUTPUT}"
+
+  validate-repository:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Set up Go for actionlint
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install actionlint
+        env:
+          GOBIN: ${{ runner.temp }}/validation-bin
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "${GOBIN}" >> "${GITHUB_PATH}"
+
+      - name: Validate repository sources
+        env:
+          VALIDATION_REQUIRE_TOOLS: "1"
+        run: bash scripts/validation/repo.sh
+
+  validate-core:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: customizations-repo
+
+      - name: Checkout Core upstream release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: router-for-me/CLIProxyAPI
+          ref: ${{ needs.check-version.outputs.core_sha }}
+          path: upstream-core
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: upstream-core/go.mod
+          cache-dependency-path: upstream-core/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Validate Core customization
+        run: bash customizations-repo/scripts/validation/core.sh upstream-core
+
+  validate-management:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: customizations-repo
+
+      - name: Checkout Management upstream release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: router-for-me/Cli-Proxy-API-Management-Center
+          ref: ${{ needs.check-version.outputs.management_sha }}
+          path: upstream-management
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: upstream-management/package.json
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('upstream-management/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Validate Management customization
+        env:
+          VERSION: v${{ needs.check-version.outputs.management_version }}-pro
+        run: bash customizations-repo/scripts/validation/management.sh upstream-management
 
   build-docker-image:
     needs:
@@ -112,19 +236,19 @@ jobs:
 
     steps:
       - name: Checkout customizations
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: customizations-repo
           fetch-depth: 1
 
       - name: Download Linux amd64 core asset
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: core-release-assets-linux-amd64
           path: docker-assets/linux-amd64
 
       - name: Download Linux arm64 core asset
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: core-release-assets-linux-arm64
           path: docker-assets/linux-arm64
@@ -161,19 +285,19 @@ jobs:
           ls -lh "${context_dir}/binaries/linux/amd64/CLIProxyAPI" "${context_dir}/binaries/linux/arm64/CLIProxyAPI"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ./docker-runtime-context
           file: ./docker-runtime-context/Dockerfile.runtime
@@ -184,7 +308,10 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/cliproxyapi-pro:${{ needs.check-version.outputs.release_tag }}
 
   build-core-binaries:
-    needs: check-version
+    needs:
+      - check-version
+      - validate-repository
+      - validate-core
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ${{ matrix.runner }}
 
@@ -236,7 +363,7 @@ jobs:
             asset_arch: amd64
             archive_format: tar.gz
             asset_suffix: ""
-            manylinux_image: quay.io/pypa/manylinux2014_x86_64
+            manylinux_image: quay.io/pypa/manylinux2014_x86_64@sha256:0d25b049964b2549b83384036abdff06789a8c0b1e9ff003ec80f0d531f79e50
           - target: linux-arm64
             kind: linux-glibc-plugin
             runner: ubuntu-24.04-arm
@@ -245,7 +372,7 @@ jobs:
             asset_arch: aarch64
             archive_format: tar.gz
             asset_suffix: ""
-            manylinux_image: quay.io/pypa/manylinux2014_aarch64
+            manylinux_image: quay.io/pypa/manylinux2014_aarch64@sha256:ae34a6ceeefe0b535c525b2e96f297311c8f1e01cfd8b9be5f647eece5b5c60b
           - target: linux-amd64-no-plugin
             kind: no-plugin
             runner: ubuntu-latest
@@ -292,30 +419,30 @@ jobs:
 
     steps:
       - name: Checkout customizations
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: customizations-repo
           fetch-depth: 0
           fetch-tags: true
 
       - name: Checkout core upstream release
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: router-for-me/CLIProxyAPI
-          ref: ${{ needs.check-version.outputs.core_tag }}
+          ref: ${{ needs.check-version.outputs.core_sha }}
           path: upstream-core
           fetch-depth: 0
           fetch-tags: true
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: upstream-core/go.mod
           cache: true
           cache-dependency-path: upstream-core/go.sum
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
 
@@ -325,9 +452,16 @@ jobs:
           SRC_ROOT: ${{ github.workspace }}/upstream-core
           RELEASE_TAG: ${{ needs.check-version.outputs.release_tag }}
           CORE_TAG: ${{ needs.check-version.outputs.core_tag }}
+          MODELS_SHA: ${{ needs.check-version.outputs.models_sha }}
         run: |
           set -euo pipefail
-          git -C upstream-core fetch --depth 1 https://github.com/router-for-me/models.git main
+          core_source_date_epoch="$(git -C upstream-core show -s --format=%ct HEAD)"
+          customization_source_date_epoch="$(git -C customizations-repo show -s --format=%ct HEAD)"
+          git -C upstream-core fetch --depth 1 https://github.com/router-for-me/models.git "${MODELS_SHA}"
+          test "$(git -C upstream-core rev-parse FETCH_HEAD)" = "${MODELS_SHA}"
+          models_source_date_epoch="$(git -C upstream-core show -s --format=%ct FETCH_HEAD)"
+          source_date_epoch="$(printf '%s\n' "${core_source_date_epoch}" "${customization_source_date_epoch}" "${models_source_date_epoch}" | sort -n | tail -n 1)"
+          build_date="$(SOURCE_DATE_EPOCH="${source_date_epoch}" python3 -c 'import datetime, os; print(datetime.datetime.fromtimestamp(int(os.environ["SOURCE_DATE_EPOCH"]), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
           git -C upstream-core show FETCH_HEAD:models.json > upstream-core/internal/registry/models/models.json
           python customizations-repo/cliproxyapi-pro-core/patches/apply_upstream_patches.py
           cp customizations-repo/README.md upstream-core/README.md
@@ -337,12 +471,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
-          git diff --cached --quiet || git commit -m "Apply CLIProxyAPI Pro release customizations"
+          git diff --cached --quiet || GIT_AUTHOR_DATE="${build_date}" GIT_COMMITTER_DATE="${build_date}" git commit -m "Apply CLIProxyAPI Pro release customizations"
           git tag -f "${RELEASE_TAG}"
           echo "GO_VERSION=$(go env GOVERSION | sed 's/^go//')" >> "${GITHUB_ENV}"
-          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "BUILD_DATE=${build_date}" >> "${GITHUB_ENV}"
+          echo "SOURCE_DATE_EPOCH=${source_date_epoch}" >> "${GITHUB_ENV}"
           echo "build_date=${build_date}" >> "${GITHUB_OUTPUT}"
+          echo "source_date_epoch=${source_date_epoch}" >> "${GITHUB_OUTPUT}"
 
       - name: Build hosted plugin-capable archive
         if: matrix.kind == 'hosted-plugin'
@@ -355,6 +490,7 @@ jobs:
           ASSET_ARCH: ${{ matrix.asset_arch }}
           ARCHIVE_FORMAT: ${{ matrix.archive_format }}
           BUILD_DATE: ${{ steps.prepare-core.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ steps.prepare-core.outputs.source_date_epoch }}
         run: |
           set -euo pipefail
           cd upstream-core
@@ -369,16 +505,17 @@ jobs:
           rm -rf "dist/${GOOS}-${GOARCH}"
           mkdir -p "${archive_dir}"
 
-          CGO_ENABLED=1 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -buildvcs=false \
+          CGO_ENABLED=1 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -buildvcs=false -trimpath \
             -ldflags="-s -w -X main.Version=${RELEASE_TAG} -X main.Commit=release-${CORE_TAG} -X main.BuildDate=${BUILD_DATE}" \
             -o "${archive_dir}/${binary_name}" ./cmd/server/
 
           cp LICENSE README.md README_EN.md config.example.yaml "${archive_dir}/"
-          if [ "${ARCHIVE_FORMAT}" = "zip" ]; then
-            powershell -NoProfile -Command "Compress-Archive -Path '${archive_dir}/*' -DestinationPath 'dist/${archive_name}' -Force"
-          else
-            tar -C "${archive_dir}" -czf "dist/${archive_name}" "${binary_name}" LICENSE README.md README_EN.md config.example.yaml
-          fi
+          python ../customizations-repo/scripts/build/create_reproducible_archive.py \
+            --format "${ARCHIVE_FORMAT}" \
+            --output "dist/${archive_name}" \
+            --root "${archive_dir}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+            "${binary_name}" LICENSE README.md README_EN.md config.example.yaml
 
       - name: Build Linux glibc plugin-capable archive
         if: matrix.kind == 'linux-glibc-plugin'
@@ -389,6 +526,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           ASSET_ARCH: ${{ matrix.asset_arch }}
           MANYLINUX_IMAGE: ${{ matrix.manylinux_image }}
+          SOURCE_DATE_EPOCH: ${{ steps.prepare-core.outputs.source_date_epoch }}
         run: |
           set -euo pipefail
           cd upstream-core
@@ -398,6 +536,16 @@ jobs:
           rm -rf "dist/linux-${GOARCH}"
           mkdir -p "${archive_dir}"
 
+          go_archive="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+          go_sha256="$(
+            curl -fsSL 'https://go.dev/dl/?mode=json&include=all' |
+              python3 -c 'import json, sys; filename = sys.argv[1]; print(next(item["sha256"] for release in json.load(sys.stdin) for item in release["files"] if item["filename"] == filename))' "${go_archive}"
+          )"
+          if [[ ! "${go_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'Invalid SHA256 for %s: %s\n' "${go_archive}" "${go_sha256}" >&2
+            exit 1
+          fi
+
           docker run --rm \
             -v "${PWD}:/src" \
             -w /src \
@@ -405,16 +553,18 @@ jobs:
             -e GOARCH \
             -e RELEASE_TAG \
             -e CORE_TAG \
-            -e BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -e BUILD_DATE \
+            -e "GO_SHA256=${go_sha256}" \
             "${MANYLINUX_IMAGE}" \
             bash -euo pipefail -c '
               go_archive="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
               curl -fsSL "https://go.dev/dl/${go_archive}" -o "/tmp/${go_archive}"
+              printf "%s  %s\n" "${GO_SHA256}" "/tmp/${go_archive}" | sha256sum -c -
               rm -rf /usr/local/go
               tar -C /usr/local -xzf "/tmp/${go_archive}"
               export PATH="/usr/local/go/bin:${PATH}"
 
-              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build -buildvcs=false \
+              CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build -buildvcs=false -trimpath \
                 -ldflags="-s -w -X main.Version=${RELEASE_TAG} -X main.Commit=release-${CORE_TAG} -X main.BuildDate=${BUILD_DATE}" \
                 -o "'"${archive_dir}"'/cli-proxy-api" ./cmd/server/
 
@@ -430,7 +580,12 @@ jobs:
             '
 
           cp LICENSE README.md README_EN.md config.example.yaml "${archive_dir}/"
-          tar -C "${archive_dir}" -czf "dist/${archive_name}" cli-proxy-api LICENSE README.md README_EN.md config.example.yaml
+          python ../customizations-repo/scripts/build/create_reproducible_archive.py \
+            --format tar.gz \
+            --output "dist/${archive_name}" \
+            --root "${archive_dir}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+            cli-proxy-api LICENSE README.md README_EN.md config.example.yaml
 
       - name: Install FreeBSD plugin build dependencies
         if: matrix.kind == 'freebsd-plugin'
@@ -441,16 +596,20 @@ jobs:
 
       - name: Prepare workspace git metadata for FreeBSD plugin build
         if: matrix.kind == 'freebsd-plugin'
+        env:
+          BUILD_DATE: ${{ steps.prepare-core.outputs.build_date }}
         run: |
           set -euo pipefail
           git init .
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit --allow-empty -m "Prepare workspace metadata for cgo action"
+          GIT_AUTHOR_DATE="${BUILD_DATE}" GIT_COMMITTER_DATE="${BUILD_DATE}" git commit --allow-empty -m "Prepare workspace metadata for cgo action"
 
       - name: Build FreeBSD plugin-capable binary
         if: matrix.kind == 'freebsd-plugin'
-        uses: go-cross/cgo-actions@v1
+        uses: go-cross/cgo-actions@d0b8f2f2d67923ce9a42d92a7ef0ed1ebd905f0a # v1
+        env:
+          GOFLAGS: -buildvcs=false -trimpath
         with:
           dir: upstream-core
           packages: ./cmd/server/
@@ -469,6 +628,7 @@ jobs:
           RELEASE_TAG: ${{ needs.check-version.outputs.release_tag }}
           GOOS: ${{ matrix.goos }}
           ASSET_ARCH: ${{ matrix.asset_arch }}
+          SOURCE_DATE_EPOCH: ${{ steps.prepare-core.outputs.source_date_epoch }}
         run: |
           set -euo pipefail
           cd upstream-core
@@ -478,7 +638,12 @@ jobs:
           mkdir -p "${archive_dir}"
           cp "dist/${{ matrix.target }}/bin/cli-proxy-api" "${archive_dir}/cli-proxy-api"
           cp LICENSE README.md README_EN.md config.example.yaml "${archive_dir}/"
-          tar -C "${archive_dir}" -czf "dist/${archive_name}" cli-proxy-api LICENSE README.md README_EN.md config.example.yaml
+          python ../customizations-repo/scripts/build/create_reproducible_archive.py \
+            --format tar.gz \
+            --output "dist/${archive_name}" \
+            --root "${archive_dir}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+            cli-proxy-api LICENSE README.md README_EN.md config.example.yaml
 
       - name: Build no-plugin archive
         if: matrix.kind == 'no-plugin'
@@ -491,6 +656,7 @@ jobs:
           ASSET_ARCH: ${{ matrix.asset_arch }}
           ASSET_SUFFIX: ${{ matrix.asset_suffix }}
           BUILD_DATE: ${{ steps.prepare-core.outputs.build_date }}
+          SOURCE_DATE_EPOCH: ${{ steps.prepare-core.outputs.source_date_epoch }}
         run: |
           set -euo pipefail
           cd upstream-core
@@ -500,7 +666,7 @@ jobs:
           rm -rf "dist/${GOOS}-${GOARCH}${ASSET_SUFFIX}"
           mkdir -p "${archive_dir}"
 
-          CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -buildvcs=false \
+          CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -buildvcs=false -trimpath \
             -ldflags="-s -w -X main.Version=${RELEASE_TAG} -X main.Commit=release-${CORE_TAG} -X main.BuildDate=${BUILD_DATE}" \
             -o "${archive_dir}/cli-proxy-api" ./cmd/server/
 
@@ -511,10 +677,15 @@ jobs:
           fi
 
           cp LICENSE README.md README_EN.md config.example.yaml "${archive_dir}/"
-          tar -C "${archive_dir}" -czf "dist/${archive_name}" cli-proxy-api LICENSE README.md README_EN.md config.example.yaml
+          python ../customizations-repo/scripts/build/create_reproducible_archive.py \
+            --format tar.gz \
+            --output "dist/${archive_name}" \
+            --root "${archive_dir}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}" \
+            cli-proxy-api LICENSE README.md README_EN.md config.example.yaml
 
       - name: Upload core binary assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: core-release-assets-${{ matrix.target }}
           path: |
@@ -535,7 +706,7 @@ jobs:
 
     steps:
       - name: Download core binary assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: core-release-assets-*
           path: core-assets
@@ -554,7 +725,7 @@ jobs:
           sha256sum "${archives[@]}" | sort -k2 > checksums.txt
 
       - name: Upload assembled core assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: core-release-assets
           path: |
@@ -565,7 +736,10 @@ jobs:
           retention-days: 7
 
   build-management-html:
-    needs: check-version
+    needs:
+      - check-version
+      - validate-repository
+      - validate-management
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
@@ -574,16 +748,16 @@ jobs:
 
     steps:
       - name: Checkout customizations
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: customizations-repo
           fetch-depth: 1
 
       - name: Checkout management upstream release
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: router-for-me/Cli-Proxy-API-Management-Center
-          ref: ${{ needs.check-version.outputs.management_tag }}
+          ref: ${{ needs.check-version.outputs.management_sha }}
           path: upstream-management
           fetch-depth: 1
 
@@ -591,12 +765,12 @@ jobs:
         run: bash customizations-repo/cliproxyapi-pro-management/apply.sh upstream-management
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version-file: upstream-management/package.json
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('upstream-management/bun.lock') }}
@@ -622,7 +796,7 @@ jobs:
           ls -lh management.html
 
       - name: Upload management asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: management-release-asset
           path: upstream-management/dist/management.html
@@ -643,35 +817,35 @@ jobs:
 
     steps:
       - name: Checkout customizations
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: customizations-repo
           fetch-depth: 1
 
       - name: Checkout core upstream release
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: router-for-me/CLIProxyAPI
-          ref: ${{ needs.check-version.outputs.core_tag }}
+          ref: ${{ needs.check-version.outputs.core_sha }}
           path: upstream-core
           fetch-depth: 1
 
       - name: Checkout management upstream release
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: router-for-me/Cli-Proxy-API-Management-Center
-          ref: ${{ needs.check-version.outputs.management_tag }}
+          ref: ${{ needs.check-version.outputs.management_sha }}
           path: upstream-management
           fetch-depth: 1
 
       - name: Download core binary assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: core-release-assets
           path: release-assets/core
 
       - name: Download management asset
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: management-release-asset
           path: release-assets/management
@@ -687,6 +861,7 @@ jobs:
           CORE_VERSION: ${{ needs.check-version.outputs.core_version }}
           MANAGEMENT_TAG: ${{ needs.check-version.outputs.management_tag }}
           MANAGEMENT_VERSION: ${{ needs.check-version.outputs.management_version }}
+          MODELS_SHA: ${{ needs.check-version.outputs.models_sha }}
         run: |
           set -euo pipefail
           core_notes="$(gh release view "${CORE_TAG}" --repo "${CORE_UPSTREAM_REPO}" --json body --jq '.body // ""')"
@@ -735,6 +910,7 @@ jobs:
             echo "- Management build version: v${MANAGEMENT_VERSION}-pro"
             echo "- Core upstream commit: ${core_sha}"
             echo "- Management upstream commit: ${management_sha}"
+            echo "- Models data commit: ${MODELS_SHA}"
             echo "- Customization commit: ${customization_sha}"
             echo
             echo "## Assets"
@@ -1041,7 +1217,7 @@ jobs:
       contents: read
     steps:
       - name: Delete old workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
+        uses: Mattraks/delete-workflow-runs@0cf693bc9909e5e867ee8f27b813224ba862939c # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}

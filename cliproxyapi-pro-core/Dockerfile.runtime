@@ -1,4 +1,4 @@
-FROM debian:bookworm
+FROM debian:bookworm@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc
 
 ARG TARGETARCH
 
@@ -6,7 +6,10 @@ RUN mkdir -p /CLIProxyAPI/usage
 
 COPY --from=ghcr.io/komari-monitor/komari-agent:latest /app/komari-agent /CLIProxyAPI/komari-agent
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl tzdata; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /CLIProxyAPI
 

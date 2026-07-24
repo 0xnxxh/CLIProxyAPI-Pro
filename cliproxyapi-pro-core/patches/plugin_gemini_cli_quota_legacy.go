@@ -21,6 +21,18 @@ const (
 	legacyGeminiCLIGoogleOneAI   = "GOOGLE_ONE_AI"
 )
 
+type legacyGeminiCLIHTTPError struct {
+	status int
+}
+
+func (err legacyGeminiCLIHTTPError) Error() string {
+	return fmt.Sprintf("status %d", err.status)
+}
+
+func (err legacyGeminiCLIHTTPError) HTTPStatus() int {
+	return err.status
+}
+
 func (h *Host) legacyQuotaProviderForRecord(record capabilityRecord) (string, bool) {
 	if h == nil || record.plugin.Capabilities.QuotaProvider != nil {
 		return "", false
@@ -120,7 +132,7 @@ func (h *Host) callLegacyGeminiCLIEndpoint(ctx context.Context, auth *coreauth.A
 		return fmt.Errorf("response exceeds %d bytes", legacyGeminiCLIMaxBodyBytes)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("status %d", resp.StatusCode)
+		return legacyGeminiCLIHTTPError{status: resp.StatusCode}
 	}
 	if errDecode := json.Unmarshal(responseBody, out); errDecode != nil {
 		return fmt.Errorf("decode response: %w", errDecode)
@@ -132,16 +144,31 @@ func legacyGeminiCLIProjectID(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if value := strings.TrimSpace(auth.Attributes["project_id"]); value != "" {
-		return value
+	for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
+		if value := legacyGeminiCLIFirstProjectID(auth.Attributes[key]); value != "" {
+			return value
+		}
 	}
-	if value, _ := auth.Metadata["project_id"].(string); strings.TrimSpace(value) != "" {
-		return strings.TrimSpace(value)
+	for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
+		if value, _ := auth.Metadata[key].(string); legacyGeminiCLIFirstProjectID(value) != "" {
+			return legacyGeminiCLIFirstProjectID(value)
+		}
 	}
 	var storage map[string]any
 	if json.Unmarshal(storageJSONFromAuth(auth), &storage) == nil {
-		if value, _ := storage["project_id"].(string); strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+		for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
+			if value, _ := storage[key].(string); legacyGeminiCLIFirstProjectID(value) != "" {
+				return legacyGeminiCLIFirstProjectID(value)
+			}
+		}
+	}
+	return ""
+}
+
+func legacyGeminiCLIFirstProjectID(value string) string {
+	for _, part := range strings.Split(value, ",") {
+		if projectID := strings.TrimSpace(part); projectID != "" {
+			return projectID
 		}
 	}
 	return ""
@@ -153,24 +180,29 @@ type legacyGeminiCLIBucket struct {
 }
 
 type legacyGeminiCLIGroup struct {
-	id, label, preferred string
-	models               []string
+	id, label string
 }
 
-var legacyGeminiCLIGroups = []legacyGeminiCLIGroup{
-	{id: "gemini-flash-lite-series", label: "Gemini Flash Lite Series", preferred: "gemini-2.5-flash-lite", models: []string{"gemini-2.5-flash-lite"}},
-	{id: "gemini-flash-series", label: "Gemini Flash Series", preferred: "gemini-3-flash-preview", models: []string{"gemini-3-flash-preview", "gemini-2.5-flash"}},
-	{id: "gemini-pro-series", label: "Gemini Pro Series", preferred: "gemini-3.1-pro-preview", models: []string{"gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-2.5-pro"}},
+func legacyGeminiCLIGroupForModel(modelID string) legacyGeminiCLIGroup {
+	normalized := strings.ToLower(strings.TrimSpace(modelID))
+	if strings.HasPrefix(normalized, "gemini-") {
+		switch {
+		case strings.Contains(normalized, "-flash-lite"):
+			return legacyGeminiCLIGroup{id: "gemini-flash-lite-series", label: "Gemini Flash Lite Series"}
+		case strings.Contains(normalized, "-flash"):
+			return legacyGeminiCLIGroup{id: "gemini-flash-series", label: "Gemini Flash Series"}
+		case strings.Contains(normalized, "-pro"):
+			return legacyGeminiCLIGroup{id: "gemini-pro-series", label: "Gemini Pro Series"}
+		}
+	}
+	return legacyGeminiCLIGroup{id: modelID, label: modelID}
 }
 
 func legacyGeminiCLIQuotaItems(payload map[string]any) []pluginapi.QuotaItem {
-	lookup := make(map[string]legacyGeminiCLIGroup)
-	order := make(map[string]int)
-	for index, group := range legacyGeminiCLIGroups {
-		order[group.id] = index
-		for _, model := range group.models {
-			lookup[model] = group
-		}
+	order := map[string]int{
+		"gemini-flash-lite-series": 0,
+		"gemini-flash-series":      1,
+		"gemini-pro-series":        2,
 	}
 	type aggregate struct {
 		group   legacyGeminiCLIGroup
@@ -182,10 +214,7 @@ func legacyGeminiCLIQuotaItems(payload map[string]any) []pluginapi.QuotaItem {
 		if bucket.modelID == "gemini-2.0-flash" || strings.HasPrefix(bucket.modelID, "gemini-2.0-flash-") {
 			continue
 		}
-		group, okGroup := lookup[bucket.modelID]
-		if !okGroup {
-			group = legacyGeminiCLIGroup{id: bucket.modelID, label: bucket.modelID, preferred: bucket.modelID, models: []string{bucket.modelID}}
-		}
+		group := legacyGeminiCLIGroupForModel(bucket.modelID)
 		key := group.id + "\x00" + bucket.tokenType
 		if aggregates[key] == nil {
 			aggregates[key] = &aggregate{group: group, token: bucket.tokenType}
@@ -196,18 +225,9 @@ func legacyGeminiCLIQuotaItems(payload map[string]any) []pluginapi.QuotaItem {
 	items := make([]pluginapi.QuotaItem, 0, len(aggregates))
 	for _, aggregate := range aggregates {
 		chosen := aggregate.buckets[0]
-		foundPreferred := false
-		for _, bucket := range aggregate.buckets {
-			if bucket.modelID == aggregate.group.preferred {
-				chosen, foundPreferred = bucket, true
-				break
-			}
-		}
-		if !foundPreferred {
-			for _, bucket := range aggregate.buckets[1:] {
-				if legacyGeminiCLILessNullable(bucket.remainingFraction, chosen.remainingFraction) {
-					chosen = bucket
-				}
+		for _, bucket := range aggregate.buckets[1:] {
+			if legacyGeminiCLILessNullable(bucket.remainingFraction, chosen.remainingFraction) {
+				chosen = bucket
 			}
 		}
 		modelIDs := make([]string, 0, len(aggregate.buckets))
@@ -254,11 +274,16 @@ func legacyGeminiCLIParseBuckets(value any) []legacyGeminiCLIBucket {
 		if modelID == "" {
 			continue
 		}
+		remainingFraction := legacyGeminiCLIFirstNumber(row, "remainingFraction", "remaining_fraction")
+		remainingAmount := legacyGeminiCLIFirstNumber(row, "remainingAmount", "remaining_amount")
+		resetAt := legacyGeminiCLIFirstString(row, "resetTime", "reset_time")
+		if remainingFraction == nil && ((remainingAmount != nil && *remainingAmount <= 0) || resetAt != "") {
+			zero := 0.0
+			remainingFraction = &zero
+		}
 		out = append(out, legacyGeminiCLIBucket{
 			modelID: modelID, tokenType: legacyGeminiCLIFirstString(row, "tokenType", "token_type"),
-			resetAt:           legacyGeminiCLIFirstString(row, "resetTime", "reset_time"),
-			remainingFraction: legacyGeminiCLIFirstNumber(row, "remainingFraction", "remaining_fraction"),
-			remainingAmount:   legacyGeminiCLIFirstNumber(row, "remainingAmount", "remaining_amount"),
+			resetAt: resetAt, remainingFraction: remainingFraction, remainingAmount: remainingAmount,
 		})
 	}
 	return out

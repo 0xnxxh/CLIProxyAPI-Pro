@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -15,6 +17,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/embeddedusage/internalusage"
 )
+
+type failingImportReader struct{}
+
+func (failingImportReader) Read([]byte) (int, error) {
+	return 0, errors.New("forced import read failure")
+}
 
 func TestUsageStreamPushesInsertedEventsWithoutPollingDelay(t *testing.T) {
 	store := openTestStore(t)
@@ -94,6 +102,147 @@ func TestHandleUsageResetRequiresConfirmation(t *testing.T) {
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestUsageImportDoesNotWriteBeforeRequestIsFullyRead(t *testing.T) {
+	store := openTestStore(t)
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	server := NewServer(Config{QueryLimit: 50000, BatchSize: 1}, store)
+	server.RegisterGinRoutes(router.Group("/usage"))
+	event, err := json.Marshal(testUsageEvent(0, false, 10))
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	body := io.MultiReader(bytes.NewReader(append(event, '\n')), failingImportReader{})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/usage/import", body)
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", recorder.Code, recorder.Body.String())
+	}
+	events, _, err := store.Counts(context.Background())
+	if err != nil || events != 0 {
+		t.Fatalf("Counts() = %d, _, %v; import must not partially write", events, err)
+	}
+}
+
+func TestUsageImportDoesNotTreatUnknownRecordAsEvent(t *testing.T) {
+	store := openTestStore(t)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/usage/import?allow_legacy=1", strings.NewReader(`{"record_type":"future_record","model":"must-not-import"}`))
+	testUsageRouter(store).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 legacy-compatible response; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result struct {
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil || result.Failed != 1 {
+		t.Fatalf("import result = %+v, %v; want one failed record", result, err)
+	}
+	events, _, err := store.Counts(context.Background())
+	if err != nil || events != 0 {
+		t.Fatalf("Counts() = %d, _, %v; unknown record must not become an event", events, err)
+	}
+}
+
+func TestUsageImportRequiresManifestUnlessLegacyIsExplicitlyAllowed(t *testing.T) {
+	event, err := json.Marshal(testUsageEvent(0, false, 10))
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	store := openTestStore(t)
+	router := testUsageRouter(store)
+
+	rejected := httptest.NewRecorder()
+	router.ServeHTTP(rejected, httptest.NewRequest(http.MethodPost, "/usage/import", bytes.NewReader(event)))
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "backup manifest is required") {
+		t.Fatalf("default import status = %d, body=%s", rejected.Code, rejected.Body.String())
+	}
+	events, _, err := store.Counts(context.Background())
+	if err != nil || events != 0 {
+		t.Fatalf("Counts() after rejected legacy import = %d, _, %v", events, err)
+	}
+
+	allowed := httptest.NewRecorder()
+	router.ServeHTTP(allowed, httptest.NewRequest(http.MethodPost, "/usage/import?allow_legacy=1", bytes.NewReader(event)))
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("explicit legacy import status = %d, body=%s", allowed.Code, allowed.Body.String())
+	}
+	var result struct {
+		LegacyBackup bool `json:"legacyBackup"`
+		Added        int  `json:"added"`
+	}
+	if err := json.Unmarshal(allowed.Body.Bytes(), &result); err != nil || !result.LegacyBackup || result.Added != 1 {
+		t.Fatalf("legacy import result = %+v, %v", result, err)
+	}
+}
+
+func TestUsageImportRejectsTamperedManifestBackupBeforeWriting(t *testing.T) {
+	sourceStore := openTestStore(t)
+	insertTestUsageEvents(t, sourceStore, testUsageEvent(0, false, 10))
+	exportRecorder := httptest.NewRecorder()
+	testUsageRouter(sourceStore).ServeHTTP(exportRecorder, httptest.NewRequest(http.MethodGet, "/usage/export", nil))
+	if exportRecorder.Code != http.StatusOK {
+		t.Fatalf("export status = %d; body=%s", exportRecorder.Code, exportRecorder.Body.String())
+	}
+	if !bytes.HasPrefix(exportRecorder.Body.Bytes(), []byte(`{"record_type":"backup_manifest"`)) {
+		t.Fatalf("export is missing backup manifest: %s", exportRecorder.Body.String())
+	}
+	tampered := bytes.Replace(exportRecorder.Body.Bytes(), []byte(`"model":"model"`), []byte(`"model":"tampered"`), 1)
+	if bytes.Equal(tampered, exportRecorder.Body.Bytes()) {
+		t.Fatal("test backup event was not changed")
+	}
+
+	targetStore := openTestStore(t)
+	importRecorder := httptest.NewRecorder()
+	testUsageRouter(targetStore).ServeHTTP(importRecorder, httptest.NewRequest(http.MethodPost, "/usage/import", bytes.NewReader(tampered)))
+	if importRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("import status = %d, want 400; body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+	events, _, err := targetStore.Counts(context.Background())
+	if err != nil || events != 0 {
+		t.Fatalf("Counts() = %d, _, %v; tampered backup must not write", events, err)
+	}
+}
+
+func TestUsageImportRestoresModelPriceRuleWhenOnlyNewerHistoryRemains(t *testing.T) {
+	ctx := context.Background()
+	sourceStore := openTestStore(t)
+	sourceRule := testGPT56PriceRule()
+	sourceRule.Base.Input = 1.25
+	if _, changed, err := sourceStore.UpsertModelPriceRule(ctx, sourceRule, true); err != nil || !changed {
+		t.Fatalf("source UpsertModelPriceRule() = changed:%v err:%v", changed, err)
+	}
+	exportRecorder := httptest.NewRecorder()
+	testUsageRouter(sourceStore).ServeHTTP(exportRecorder, httptest.NewRequest(http.MethodGet, "/usage/export", nil))
+	if exportRecorder.Code != http.StatusOK {
+		t.Fatalf("export status = %d; body=%s", exportRecorder.Code, exportRecorder.Body.String())
+	}
+
+	targetStore := openTestStore(t)
+	targetRule := testGPT56PriceRule()
+	if _, changed, err := targetStore.UpsertModelPriceRule(ctx, targetRule, true); err != nil || !changed {
+		t.Fatalf("target first UpsertModelPriceRule() = changed:%v err:%v", changed, err)
+	}
+	targetRule.Base.Input = 9.99
+	if _, changed, err := targetStore.UpsertModelPriceRule(ctx, targetRule, true); err != nil || !changed {
+		t.Fatalf("target second UpsertModelPriceRule() = changed:%v err:%v", changed, err)
+	}
+	if err := targetStore.DeleteModelPriceRule(ctx, "", targetRule.Model); err != nil {
+		t.Fatalf("DeleteModelPriceRule() error = %v", err)
+	}
+
+	importRecorder := httptest.NewRecorder()
+	testUsageRouter(targetStore).ServeHTTP(importRecorder, httptest.NewRequest(http.MethodPost, "/usage/import", bytes.NewReader(exportRecorder.Body.Bytes())))
+	if importRecorder.Code != http.StatusOK {
+		t.Fatalf("import status = %d, want 200; body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+	rules, err := targetStore.ActiveModelPriceRules(ctx)
+	if err != nil || len(rules) != 1 || rules[0].Model != sourceRule.Model || rules[0].Base.Input != sourceRule.Base.Input || rules[0].Version <= 2 {
+		t.Fatalf("restored rules = %+v err:%v; want imported rule newer than retained version 2", rules, err)
 	}
 }
 
@@ -316,18 +465,34 @@ func TestHandleUsageHistoryEventsSupportsStructuredFilters(t *testing.T) {
 	third.Provider = "beta"
 	third.Model = "model-b"
 	third.APIKeyHash = "key-b"
-	insertTestUsageEvents(t, store, first, second, third)
+	fourth := testUsageEvent(3, true, 40)
+	fourth.Provider = "alpha"
+	fourth.Model = "model-a"
+	fourth.APIKeyHash = "key-a"
+	fourth.AuthIndex = "auth-meta"
+	insertTestUsageEvents(t, store, first, second, third, fourth)
 	router := testUsageRouter(store)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/usage/events?direction=before&limit=10&provider=alpha&model=model-a&api_key_hash=key-a&status=failed&search=needle", nil)
+	request := httptest.NewRequest(http.MethodGet, "/usage/events?direction=before&limit=1&provider=alpha&model=model-a&api_key_hash=key-a&status=failed&search=needle&search_auth_indexes=auth-meta", nil)
 	router.ServeHTTP(recorder, request)
 	payload := decodeUsagePayload(t, recorder)
-	if got := usageDetailIDs(payload); len(got) != 1 || got[0] != 2 {
-		t.Fatalf("filtered ids = %v, want [2]", got)
+	if got := usageDetailIDs(payload); len(got) != 1 || got[0] != 4 {
+		t.Fatalf("first filtered page ids = %v, want [4]", got)
 	}
-	if payload.MatchedTotal != 1 || payload.HasMore {
-		t.Fatalf("filtered metadata = %+v, want matched=1 final page", payload)
+	if payload.MatchedTotal != 2 || !payload.HasMore || payload.NextCursor == "" {
+		t.Fatalf("first filtered page metadata = %+v, want matched=2 and next cursor", payload)
+	}
+
+	nextRecorder := httptest.NewRecorder()
+	nextRequest := httptest.NewRequest(http.MethodGet, "/usage/events?cursor="+payload.NextCursor+"&limit=1", nil)
+	router.ServeHTTP(nextRecorder, nextRequest)
+	nextPayload := decodeUsagePayload(t, nextRecorder)
+	if got := usageDetailIDs(nextPayload); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("second filtered page ids = %v, want [2]", got)
+	}
+	if nextPayload.MatchedTotal != 2 || nextPayload.HasMore {
+		t.Fatalf("second filtered page metadata = %+v, want matched=2 final page", nextPayload)
 	}
 }
 
@@ -623,7 +788,7 @@ func TestUsageImportFlushesQueuedRuntimeStateBeforeExplicitRestore(t *testing.T)
 
 	router := testUsageRouter(targetStore)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/usage/import", bytes.NewReader(exported))
+	request := httptest.NewRequest(http.MethodPost, "/usage/import?allow_legacy=1", bytes.NewReader(exported))
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())

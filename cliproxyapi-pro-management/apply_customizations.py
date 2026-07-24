@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+import hashlib
 import json
-import shutil
 import sys
 from pathlib import Path
 
 CUSTOMIZATION_DIR = Path(__file__).resolve().parent
 OVERLAY_DIR = CUSTOMIZATION_DIR / 'overlay'
 LOCALES_FILE = CUSTOMIZATION_DIR / 'monitoring-locales.json'
+OVERLAY_REPLACEMENTS_FILE = CUSTOMIZATION_DIR / 'overlay-replacements.json'
 
 QUOTA_LOCALE_KEYS = {
     'en.json': {
@@ -156,6 +157,41 @@ GEMINI_CLI_LOCALE_KEYS = {
     },
 }
 
+XAI_QUOTA_LOCALE_KEYS = {
+    'en.json': {
+        'plan_free': 'Free',
+        'plan_x_premium_plus': 'X Premium+',
+        'plan_paid_unknown': 'Paid (unknown tier)',
+        'free_quota': 'Free token quota',
+        'free_quota_exhausted': 'Exhausted',
+        'free_quota_window': 'Rolling 24 hours',
+    },
+    'ru.json': {
+        'plan_free': 'Бесплатный',
+        'plan_x_premium_plus': 'X Premium+',
+        'plan_paid_unknown': 'Платный (неизвестный уровень)',
+        'free_quota': 'Бесплатная квота токенов',
+        'free_quota_exhausted': 'Исчерпана',
+        'free_quota_window': 'Скользящие 24 часа',
+    },
+    'zh-CN.json': {
+        'plan_free': '免费版',
+        'plan_x_premium_plus': 'X Premium+',
+        'plan_paid_unknown': '付费版（未知档位）',
+        'free_quota': '免费 Token 额度',
+        'free_quota_exhausted': '已耗尽',
+        'free_quota_window': '滚动 24 小时',
+    },
+    'zh-TW.json': {
+        'plan_free': '免費版',
+        'plan_x_premium_plus': 'X Premium+',
+        'plan_paid_unknown': '付費版（未知級別）',
+        'free_quota': '免費 Token 配額',
+        'free_quota_exhausted': '已用盡',
+        'free_quota_window': '滾動 24 小時',
+    },
+}
+
 AUTH_FILES_SEARCH_PLACEHOLDER_KEYS = {
     'en.json': 'Filter by name, auth_index, type, provider, note, or plan. Use * as a wildcard',
     'ru.json': 'Фильтр по имени, auth_index, типу, провайдеру, заметке или тарифу, поддерживается wildcard *',
@@ -223,6 +259,34 @@ CLAUDE_MODEL_ID_CLOAK_LOCALE_KEYS = {
     },
 }
 
+def load_overlay_replacement_manifest(path: Path) -> dict[str, set[str]]:
+    payload = json.loads(path.read_text())
+    if payload.get('schemaVersion') != 1 or not isinstance(payload.get('replacements'), list):
+        raise RuntimeError(f'Invalid overlay replacement manifest: {path}')
+
+    upstream_hashes: dict[str, set[str]] = {}
+    for entry in payload['replacements']:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f'Invalid overlay replacement entry: {entry!r}')
+        relative_path = entry.get('path')
+        upstream = entry.get('upstreamSha256')
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or Path(relative_path).is_absolute()
+            or '..' in Path(relative_path).parts
+            or relative_path in upstream_hashes
+            or not isinstance(upstream, list)
+            or not upstream
+            or not all(isinstance(item, str) and len(item) == 64 for item in upstream)
+        ):
+            raise RuntimeError(f'Invalid overlay replacement entry: {entry!r}')
+        upstream_hashes[relative_path] = set(upstream)
+    return upstream_hashes
+
+
+OVERLAY_REPLACEMENT_HASHES = load_overlay_replacement_manifest(OVERLAY_REPLACEMENTS_FILE)
+
 
 _writes = {}
 
@@ -239,22 +303,34 @@ def write(path: Path, text: str) -> None:
 
 def flush_writes() -> None:
     for path, text in _writes.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
+    _writes.clear()
+
+
+def discard_writes() -> None:
+    _writes.clear()
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
     text = read(path)
     if new in text:
         return
-    if old not in text:
-        raise RuntimeError(f'Pattern not found in {path}: {old[:120]!r}')
+    match_count = text.count(old)
+    if match_count != 1:
+        raise RuntimeError(f'Expected one pattern in {path}, found {match_count}: {old[:120]!r}')
     write(path, text.replace(old, new, 1))
 
 
 def replace_once_if_present(path: Path, old: str, new: str) -> None:
     text = read(path)
-    if new in text or old not in text:
+    if new in text:
         return
+    match_count = text.count(old)
+    if match_count == 0:
+        return
+    if match_count != 1:
+        raise RuntimeError(f'Expected at most one pattern in {path}, found {match_count}: {old[:120]!r}')
     write(path, text.replace(old, new, 1))
 
 
@@ -320,20 +396,39 @@ def insert_once(path: Path, marker: str, insertion: str, present: str) -> None:
     text = read(path)
     if present in text:
         return
-    if marker not in text:
-        raise RuntimeError(f'Pattern not found in {path}: {marker[:120]!r}')
+    match_count = text.count(marker)
+    if match_count != 1:
+        raise RuntimeError(f'Expected one marker in {path}, found {match_count}: {marker[:120]!r}')
     write(path, text.replace(marker, insertion, 1))
 
 
-def copy_overlay(target: Path) -> None:
+def validate_overlay_collisions(target: Path) -> None:
     for src in OVERLAY_DIR.rglob('*'):
+        if src.is_dir():
+            continue
         rel = src.relative_to(OVERLAY_DIR)
         dst = target / rel
+        if not dst.is_file():
+            continue
+        source_digest = hashlib.sha256(src.read_bytes()).hexdigest()
+        target_digest = hashlib.sha256(dst.read_bytes()).hexdigest()
+        if target_digest == source_digest:
+            continue
+        allowed_hashes = OVERLAY_REPLACEMENT_HASHES.get(rel.as_posix())
+        if allowed_hashes is None:
+            raise RuntimeError(f'Unexpected overlay collision with upstream file: {dst}')
+        if target_digest not in allowed_hashes:
+            raise RuntimeError(f'Upstream overlay replacement changed: {dst} ({target_digest})')
+
+
+def copy_overlay(target: Path) -> None:
+    validate_overlay_collisions(target)
+    for src in OVERLAY_DIR.rglob('*'):
         if src.is_dir():
-            dst.mkdir(parents=True, exist_ok=True)
-        else:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            continue
+        rel = src.relative_to(OVERLAY_DIR)
+        dst = target / rel
+        write(dst, src.read_text())
 
 
 def patch_modal_focus_restore(target: Path) -> None:
@@ -473,6 +568,111 @@ def patch_modal_content_scrollbar_layout(target: Path) -> None:
         return
     if 'body.modal-open .content' in text:
         raise RuntimeError(f'Pattern not found in {path}: modal content scroll lock')
+
+
+def patch_api_client_connection_isolation(target: Path) -> None:
+    client = target / 'src/services/api/client.ts'
+    replace_once(
+        client,
+        "  private runtimeKind: ServerRuntimeKind = 'unknown';\n",
+        "  private runtimeKind: ServerRuntimeKind = 'unknown';\n"
+        "  private connectionGeneration: number = 0;\n"
+        "  private connectionAbortController = new AbortController();\n",
+    )
+    replace_once(
+        client,
+        "    if (connectionChanged) {\n"
+        "      this.runtimeKind = 'unknown';\n"
+        "    }\n",
+        "    if (connectionChanged) {\n"
+        "      this.connectionAbortController.abort();\n"
+        "      this.connectionAbortController = new AbortController();\n"
+        "      this.connectionGeneration += 1;\n"
+        "      this.runtimeKind = 'unknown';\n"
+        "    }\n",
+    )
+    insert_once(
+        client,
+        "  /**\n   * 设置请求/响应拦截器\n   */\n",
+        "  private combineRequestSignal(requestSignal: AxiosRequestConfig['signal']): AbortSignal {\n"
+        "    const connectionSignal = this.connectionAbortController.signal;\n"
+        "    if (!requestSignal) return connectionSignal;\n"
+        "    const callerSignal = requestSignal as AbortSignal;\n"
+        "    if (callerSignal === connectionSignal) return connectionSignal;\n"
+        "    if (typeof AbortSignal.any === 'function') {\n"
+        "      return AbortSignal.any([callerSignal, connectionSignal]);\n"
+        "    }\n"
+        "    const controller = new AbortController();\n"
+        "    const abort = () => controller.abort();\n"
+        "    if (callerSignal.aborted || connectionSignal.aborted) {\n"
+        "      abort();\n"
+        "    } else {\n"
+        "      callerSignal.addEventListener('abort', abort, { once: true });\n"
+        "      connectionSignal.addEventListener('abort', abort, { once: true });\n"
+        "    }\n"
+        "    return controller.signal;\n"
+        "  }\n\n"
+        "  private isStaleConnection(config: AxiosRequestConfig | undefined): boolean {\n"
+        "    const generation = (config as AxiosRequestConfig & { __connectionGeneration?: number } | undefined)\n"
+        "      ?.__connectionGeneration;\n"
+        "    return typeof generation === 'number' && generation !== this.connectionGeneration;\n"
+        "  }\n\n"
+        "  private staleConnectionError(): Error {\n"
+        "    return new axios.CanceledError('Connection changed while the request was in flight');\n"
+        "  }\n\n"
+        "  /**\n   * 设置请求/响应拦截器\n   */\n",
+        'private isStaleConnection(config: AxiosRequestConfig | undefined)',
+    )
+    replace_once(
+        client,
+        "      (config) => {\n"
+        "        // 设置 baseURL\n"
+        "        config.baseURL = this.apiBase;\n",
+        "      (config) => {\n"
+        "        (config as AxiosRequestConfig & { __connectionGeneration?: number })\n"
+        "          .__connectionGeneration = this.connectionGeneration;\n"
+        "        config.signal = this.combineRequestSignal(config.signal);\n"
+        "        // 设置 baseURL\n"
+        "        config.baseURL = this.apiBase;\n",
+    )
+    replace_once(
+        client,
+        "      (response) => {\n"
+        "        const headers = response.headers as Record<string, string | undefined>;\n",
+        "      (response) => {\n"
+        "        if (this.isStaleConnection(response.config)) {\n"
+        "          throw this.staleConnectionError();\n"
+        "        }\n"
+        "        const headers = response.headers as Record<string, string | undefined>;\n",
+    )
+    replace_once(
+        client,
+        "        return response;\n"
+        "      },\n"
+        "      (error) => Promise.reject(this.handleError(error))\n"
+        "    );\n",
+        "        return response;\n"
+        "      },\n"
+        "      (error) => {\n"
+        "        if (axios.isAxiosError(error) && this.isStaleConnection(error.config)) {\n"
+        "          return Promise.reject(this.staleConnectionError());\n"
+        "        }\n"
+        "        return Promise.reject(this.handleError(error));\n"
+        "      }\n"
+        "    );\n",
+    )
+
+    auth_store = target / 'src/stores/useAuthStore.ts'
+    replace_once(
+        auth_store,
+        "        useQuotaStore.getState().clearQuotaCache();\n"
+        "        set({\n"
+        "          isAuthenticated: false,\n",
+        "        useQuotaStore.getState().clearQuotaCache();\n"
+        "        apiClient.setConfig({ apiBase: '', managementKey: '' });\n"
+        "        set({\n"
+        "          isAuthenticated: false,\n",
+    )
 
 
 def patch_routes(target: Path) -> None:
@@ -702,6 +902,34 @@ def patch_quota_types(target: Path) -> None:
         "export interface GeminiCliQuotaBucketState {\n  id: string;\n  label: string;\n  remainingFraction: number | null;\n  remainingAmount: number | null;\n  resetTime: string | undefined;\n  tokenType: string | null;\n  modelIds?: string[];\n}\n\nexport interface GeminiCliQuotaState {\n  status: 'idle' | 'loading' | 'success' | 'error';\n  buckets: GeminiCliQuotaBucketState[];\n  projectId?: string;\n  project_id?: string;\n  tierLabel?: string | null;\n  tierId?: string | null;\n  creditBalance?: number | null;\n  error?: string;\n  errorStatus?: number;\n  cachedAt?: number;\n}\n\nexport interface CodexQuotaWindow",
         "export interface GeminiCliQuotaState",
     )
+    insert_once(
+        path,
+        "export interface XaiBillingSummary {\n",
+        "export interface XaiFreeQuotaSummary {\n"
+        "  source?: 'rate_limit_headers' | 'free_usage_exhausted';\n"
+        "  windowKind?: 'rolling_24h' | string;\n"
+        "  usedTokens?: number | string;\n"
+        "  limitTokens?: number | string;\n"
+        "  remainingTokens?: number | string;\n"
+        "  limitRequests?: number | string;\n"
+        "  remainingRequests?: number | string;\n"
+        "  observedAt?: number | string;\n"
+        "  exhausted?: boolean;\n"
+        "  model?: string;\n"
+        "}\n\n"
+        "export interface XaiBillingSummary {\n",
+        "export interface XaiFreeQuotaSummary",
+    )
+    replace_once(
+        path,
+        "  planType?: 'paid';\n",
+        "  planType?: 'free' | 'supergrok' | 'x-premium-plus' | 'supergrok-heavy' | 'paid' | 'paid-unknown';\n",
+    )
+    replace_once(
+        path,
+        "  usedPercent: number | null;\n}\n\nexport interface XaiQuotaState",
+        "  usedPercent: number | null;\n  freeQuota?: XaiFreeQuotaSummary;\n}\n\nexport interface XaiQuotaState",
+    )
     for old, new in [
         (
             "  errorStatus?: number;\n}\n\n// Quota state types",
@@ -733,6 +961,19 @@ def patch_quota_configs(target: Path) -> None:
         path,
         "  CodexUsagePayload,\n  KimiQuotaRow,",
         "  CodexUsagePayload,\n  GeminiCliQuotaState,\n  KimiQuotaRow,",
+    )
+    insert_once(
+        path,
+        "import type { QuotaRenderHelpers } from './QuotaCard';\n",
+        "import { useQuotaStore } from '@/stores';\n"
+        "import {\n"
+        "  mergeXaiBillingRuntimeState,\n"
+        "  resolveXaiPlanType,\n"
+        "  xaiFreeQuotaUsedPercent,\n"
+        "  type XaiNormalizedPlanType,\n"
+        "} from '@/extensions/quota/xaiQuota';\n"
+        "import type { QuotaRenderHelpers } from './QuotaCard';\n",
+        "mergeXaiBillingRuntimeState",
     )
     replace_once(
         path,
@@ -780,6 +1021,115 @@ def patch_quota_configs(target: Path) -> None:
         ),
     ]:
         replace_once(path, old, new)
+
+    replace_once(
+        path,
+        "  if (isPaidXaiAuthFile(file)) {\n    return requestXaiPaidHealth(authIndex);\n  }\n",
+        "  const mergeRuntimeState = (billing: XaiBillingSummary): XaiBillingSummary =>\n"
+        "    mergeXaiBillingRuntimeState(\n"
+        "      billing,\n"
+        "      useQuotaStore.getState().xaiQuota[file.name]?.billing\n"
+        "    );\n\n"
+        "  if (isPaidXaiAuthFile(file)) {\n"
+        "    return mergeRuntimeState(await requestXaiPaidHealth(authIndex));\n"
+        "  }\n",
+    )
+    replace_once(
+        path,
+        "  const summary = mergeXaiBillingSummaries(weeklySummary, monthlySummary);\n  if (summary) return summary;\n",
+        "  const summary = mergeXaiBillingSummaries(weeklySummary, monthlySummary);\n"
+        "  if (summary) {\n"
+        "    return mergeRuntimeState({\n"
+        "      ...summary,\n"
+        "      planType: resolveXaiPlanType(\n"
+        "        summary.monthlyLimitCents,\n"
+        "        monthlyResult.status === 'fulfilled'\n"
+        "      ),\n"
+        "    });\n"
+        "  }\n",
+    )
+    replace_once(
+        path,
+        "  try {\n    return await requestXaiPaidHealth(authIndex);\n  } catch {\n",
+        "  try {\n    return mergeRuntimeState(await requestXaiPaidHealth(authIndex));\n  } catch {\n",
+    )
+    replace_once(
+        path,
+        "const XAI_SUPERGROK_LIMIT_CENTS = 15_000;\n"
+        "const XAI_SUPERGROK_HEAVY_LIMIT_CENTS = 150_000;\n\n"
+        "const resolveXaiPlan = (\n"
+        "  monthlyLimitCents: number | null\n"
+        "): { labelKey: string; premium: boolean } | null => {\n"
+        "  if (monthlyLimitCents === XAI_SUPERGROK_LIMIT_CENTS) {\n"
+        "    return { labelKey: 'plan_supergrok', premium: false };\n"
+        "  }\n"
+        "  if (monthlyLimitCents === XAI_SUPERGROK_HEAVY_LIMIT_CENTS) {\n"
+        "    return { labelKey: 'plan_supergrok_heavy', premium: true };\n"
+        "  }\n"
+        "  return null;\n"
+        "};\n",
+        "const resolveXaiPlan = (\n"
+        "  billing: XaiBillingSummary\n"
+        "): { labelKey: string; premium: boolean } | null => {\n"
+        "  const planType = billing.planType ?? resolveXaiPlanType(\n"
+        "    billing.monthlyLimitCents,\n"
+        "    billing.monthlyLimitCents !== null\n"
+        "  );\n"
+        "  const plans: Partial<Record<XaiNormalizedPlanType, { labelKey: string; premium: boolean }>> = {\n"
+        "    free: { labelKey: 'plan_free', premium: false },\n"
+        "    supergrok: { labelKey: 'plan_supergrok', premium: false },\n"
+        "    'x-premium-plus': { labelKey: 'plan_x_premium_plus', premium: true },\n"
+        "    'supergrok-heavy': { labelKey: 'plan_supergrok_heavy', premium: true },\n"
+        "    paid: { labelKey: 'plan_paid', premium: true },\n"
+        "    'paid-unknown': { labelKey: 'plan_paid_unknown', premium: true },\n"
+        "  };\n"
+        "  return planType ? plans[planType] ?? null : null;\n"
+        "};\n",
+    )
+    replace_once(
+        path,
+        "  const plan = resolveXaiPlan(billing.monthlyLimitCents);\n",
+        "  const plan = resolveXaiPlan(billing);\n"
+        "  const freeQuotaUsed = xaiFreeQuotaUsedPercent(billing);\n"
+        "  const freeQuotaRemaining =\n"
+        "    freeQuotaUsed === null ? null : Math.max(0, Math.min(100, 100 - freeQuotaUsed));\n"
+        "  const freeQuotaLabel = billing.freeQuota?.model\n"
+        "    ? `${t('xai_quota.free_quota')} · ${billing.freeQuota.model}`\n"
+        "    : t('xai_quota.free_quota');\n",
+    )
+    replace_once(
+        path,
+        "    hasWeeklyData\n      ? h(\n",
+        "    billing.freeQuota\n"
+        "      ? h(\n"
+        "          'div',\n"
+        "          { key: 'free-quota', className: styleMap.quotaRow },\n"
+        "          h(\n"
+        "            'div',\n"
+        "            { className: styleMap.quotaRowHeader },\n"
+        "            h('span', { className: styleMap.quotaModel }, freeQuotaLabel),\n"
+        "            h(\n"
+        "              'div',\n"
+        "              { className: styleMap.quotaMeta },\n"
+        "              h(\n"
+        "                'span',\n"
+        "                { className: styleMap.quotaPercent },\n"
+        "                billing.freeQuota.exhausted\n"
+        "                  ? t('xai_quota.free_quota_exhausted')\n"
+        "                  : t('xai_quota.used_percent', { percent: formatXaiPercent(freeQuotaUsed) })\n"
+        "              ),\n"
+        "              h('span', { className: styleMap.quotaReset }, t('xai_quota.free_quota_window'))\n"
+        "            )\n"
+        "          ),\n"
+        "          h(QuotaProgressBar, {\n"
+        "            percent: freeQuotaRemaining,\n"
+        "            highThreshold: QUOTA_PROGRESS_HIGH_THRESHOLD,\n"
+        "            mediumThreshold: QUOTA_PROGRESS_MEDIUM_THRESHOLD,\n"
+        "          })\n"
+        "        )\n"
+        "      : null,\n"
+        "    hasWeeklyData\n      ? h(\n",
+    )
 
 
 def patch_quota_page(target: Path) -> None:
@@ -1213,6 +1563,13 @@ def patch_auth_files_page_search(target: Path) -> None:
     )
     insert_once(
         path,
+        "import { useAuthStore, useNotificationStore, useThemeStore, useQuotaStore } from '@/stores';\n",
+        "import { resolveXaiPlanType } from '@/extensions/quota/xaiQuota';\n"
+        "import { useAuthStore, useNotificationStore, useThemeStore, useQuotaStore } from '@/stores';\n",
+        "resolveXaiPlanType",
+    )
+    insert_once(
+        path,
         "const buildWildcardSearch = (value: string): RegExp | null => {\n"
         "  if (!value.includes('*')) return null;\n"
         "  const pattern = value.split('*').map(escapeWildcardSearchSegment).join('.*');\n"
@@ -1257,8 +1614,6 @@ def patch_auth_files_page_search(target: Path) -> None:
         "] as const;\n"
         "\n"
         "const PREMIUM_CODEX_SEARCH_PLAN_TYPES = new Set(['pro', 'prolite', 'pro-lite', 'pro_lite']);\n"
-        "const XAI_SUPERGROK_LIMIT_CENTS = 15_000;\n"
-        "const XAI_SUPERGROK_HEAVY_LIMIT_CENTS = 150_000;\n"
         "\n"
         "type AuthFileSearchTranslate = (key: string) => string;\n"
         "type AuthFileSearchQuotaStore = Pick<\n"
@@ -1348,8 +1703,15 @@ def patch_auth_files_page_search(target: Path) -> None:
         "  const record = toAuthFileSearchRecord(billing);\n"
         "  if (!record) return;\n"
         "  const monthlyLimitCents = normalizeAuthFileSearchCents(record.monthlyLimitCents);\n"
-        "  if (monthlyLimitCents === XAI_SUPERGROK_LIMIT_CENTS) values.push(t('xai_quota.plan_supergrok'), 'supergrok');\n"
-        "  if (monthlyLimitCents === XAI_SUPERGROK_HEAVY_LIMIT_CENTS) values.push(t('xai_quota.plan_supergrok_heavy'), 'supergrok heavy');\n"
+        "  const storedPlanType = normalizeAuthFileSearchPlan(record.planType ?? record.plan_type);\n"
+        "  const planType = storedPlanType || resolveXaiPlanType(monthlyLimitCents, monthlyLimitCents !== null);\n"
+        "  if (!planType) return;\n"
+        "  values.push(planType, planType.replace(/-/g, ' '));\n"
+        "  if (planType === 'free') values.push(t('xai_quota.plan_free'));\n"
+        "  else if (planType === 'supergrok') values.push(t('xai_quota.plan_supergrok'), 'supergrok');\n"
+        "  else if (planType === 'x-premium-plus') values.push(t('xai_quota.plan_x_premium_plus'), 'x premium+');\n"
+        "  else if (planType === 'supergrok-heavy') values.push(t('xai_quota.plan_supergrok_heavy'), 'supergrok heavy');\n"
+        "  else if (planType === 'paid-unknown') values.push(t('xai_quota.plan_paid_unknown'));\n"
         "};\n"
         "\n"
         "const buildAuthFileQuotaSearchValues = (\n"
@@ -1587,8 +1949,21 @@ def patch_auth_files_gemini_quota(target: Path) -> None:
     )
     replace_once(
         constants_path,
-        "  'codex',\n  'kimi',",
-        "  'codex',\n  'gemini-cli',\n  'kimi',",
+        "export const QUOTA_PROVIDER_TYPES = new Set<QuotaProviderType>([\n"
+        "  'antigravity',\n"
+        "  'claude',\n"
+        "  'codex',\n"
+        "  'kimi',\n"
+        "  'xai',\n"
+        "]);",
+        "export const QUOTA_PROVIDER_TYPES = new Set<QuotaProviderType>([\n"
+        "  'antigravity',\n"
+        "  'claude',\n"
+        "  'codex',\n"
+        "  'gemini-cli',\n"
+        "  'kimi',\n"
+        "  'xai',\n"
+        "]);",
     )
 
     insert_once(
@@ -2101,7 +2476,7 @@ def patch_locales(target: Path) -> None:
     monitoring = json.loads(LOCALES_FILE.read_text())
     locales_dir = target / 'src/i18n/locales'
     for locale_path in sorted(locales_dir.glob('*.json')):
-        data = json.loads(locale_path.read_text())
+        data = json.loads(read(locale_path))
         additions = monitoring.get(locale_path.name, {})
         data.setdefault('nav', {}).update(additions.get('nav', {}))
         nav_additions = additions.get('nav', {})
@@ -2138,6 +2513,9 @@ def patch_locales(target: Path) -> None:
             AUTH_FILES_SELECTED_COUNT_LABEL_KEYS['en.json'],
         )
         data.setdefault('gemini_cli_quota', {}).update(gemini_cli_locale['quota'])
+        data.setdefault('xai_quota', {}).update(
+            XAI_QUOTA_LOCALE_KEYS.get(locale_path.name, XAI_QUOTA_LOCALE_KEYS['en.json'])
+        )
         cloak_locale = CLAUDE_MODEL_ID_CLOAK_LOCALE_KEYS.get(
             locale_path.name,
             CLAUDE_MODEL_ID_CLOAK_LOCALE_KEYS['en.json'],
@@ -2159,7 +2537,7 @@ def patch_locales(target: Path) -> None:
                 'claude_model_id_cloak_never': cloak_locale['never'],
             }
         )
-        locale_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+        write(locale_path, json.dumps(data, ensure_ascii=False, indent=2) + '\n')
 
 
 def main() -> None:
@@ -2193,6 +2571,7 @@ def main() -> None:
     patch_auth_files_gemini_quota(target)
     patch_auth_files_runtime_state(target)
     patch_runtime_detection(target)
+    patch_api_client_connection_isolation(target)
     patch_supporting_api_and_types(target)
     patch_claude_model_id_cloak_setting(target)
     patch_locales(target)

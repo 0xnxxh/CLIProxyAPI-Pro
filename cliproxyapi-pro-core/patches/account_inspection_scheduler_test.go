@@ -80,6 +80,36 @@ func testStatusCode(value int) *int {
 	return &value
 }
 
+func TestManagementHandlerShutdownReleasesBackgroundOwners(t *testing.T) {
+	t.Setenv("ACCOUNT_INSPECTION_SCHEDULE_PATH", filepath.Join(t.TempDir(), "schedule.json"))
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	scheduler := schedulerForHandler(h)
+	if scheduler == nil {
+		t.Fatal("scheduler was not registered")
+	}
+	if routingPolicyControllerForHandler(h) == nil {
+		t.Fatal("routing policy controller was not registered")
+	}
+
+	h.Shutdown()
+	h.Shutdown()
+
+	if schedulerForHandler(h) != nil {
+		t.Fatal("scheduler registration survived shutdown")
+	}
+	if routingPolicyControllerForHandler(h) != nil {
+		t.Fatal("routing policy controller registration survived shutdown")
+	}
+	select {
+	case <-h.lifecycleContext.Done():
+	default:
+		t.Fatal("handler lifecycle context was not canceled")
+	}
+	if err := scheduler.startRun(true); err == nil {
+		t.Fatal("shut down scheduler accepted a new run")
+	}
+}
+
 func TestPaginateAccountInspectionResultsReturnsRequestedPage(t *testing.T) {
 	results := []accountInspectionResult{
 		testInspectionResult("healthy-1", accountInspectionActionKeep, false, nil, false, ""),
@@ -737,6 +767,134 @@ func TestExecuteActionDisablesGeminiCLIPluginVirtualSourceFile(t *testing.T) {
 	}
 }
 
+func TestManualActionsBindIdentityToCurrentSnapshot(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	registeredA, err := manager.Register(context.Background(), &coreauth.Auth{Provider: "codex", ID: "auth-a", FileName: "a.json", Metadata: map[string]any{"email": "a@example.com"}})
+	if err != nil {
+		t.Fatalf("Register(auth-a) error = %v", err)
+	}
+	registeredB, err := manager.Register(context.Background(), &coreauth.Auth{Provider: "codex", ID: "auth-b", FileName: "b.json", Metadata: map[string]any{"email": "b@example.com"}})
+	if err != nil {
+		t.Fatalf("Register(auth-b) error = %v", err)
+	}
+	resultA := accountFromAuth(registeredA).baseResult()
+	scheduler := &accountInspectionScheduler{
+		h:      &Handler{authManager: manager},
+		status: accountInspectionStatus{Results: []accountInspectionResult{resultA}},
+	}
+	outcomes, err := scheduler.executeManualActions(context.Background(), []accountInspectionActionItem{{
+		Key:       resultA.Key,
+		FileName:  registeredB.FileName,
+		AuthIndex: registeredB.Index,
+		Provider:  registeredB.Provider,
+		Action:    accountInspectionActionDisable,
+	}})
+	if err != nil {
+		t.Fatalf("executeManualActions() error = %v", err)
+	}
+	if len(outcomes) != 1 || !outcomes[0].Success || outcomes[0].AuthIndex != registeredA.Index || outcomes[0].FileName != registeredA.FileName {
+		t.Fatalf("outcomes = %+v, want canonical auth-a identity", outcomes)
+	}
+	gotA, _ := manager.GetByID(registeredA.ID)
+	gotB, _ := manager.GetByID(registeredB.ID)
+	if gotA == nil || !gotA.Disabled {
+		t.Fatalf("auth-a = %#v, want disabled", gotA)
+	}
+	if gotB == nil || gotB.Disabled {
+		t.Fatalf("auth-b = %#v, want enabled", gotB)
+	}
+}
+
+func TestExecuteActionRejectsStaleRuntimeIdentity(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	registeredA, _ := manager.Register(context.Background(), &coreauth.Auth{Provider: "codex", ID: "auth-a", FileName: "a.json", Metadata: map[string]any{}})
+	registeredB, _ := manager.Register(context.Background(), &coreauth.Auth{Provider: "codex", ID: "auth-b", FileName: "b.json", Metadata: map[string]any{}})
+	result := accountFromAuth(registeredA).baseResult()
+	result.AuthIndex = registeredB.Index
+	scheduler := &accountInspectionScheduler{h: &Handler{authManager: manager}}
+	if err := scheduler.executeAction(context.Background(), result, accountInspectionActionDisable); !errors.Is(err, errAccountInspectionResultStale) {
+		t.Fatalf("executeAction() error = %v, want stale result", err)
+	}
+	gotA, _ := manager.GetByID(registeredA.ID)
+	gotB, _ := manager.GetByID(registeredB.ID)
+	if gotA.Disabled || gotB.Disabled {
+		t.Fatalf("auths mutated after stale action: a=%v b=%v", gotA.Disabled, gotB.Disabled)
+	}
+}
+
+func TestExecuteActionRejectsSharedPluginVirtualSourceDelete(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "gemini-cli.json")
+	if err := os.WriteFile(authPath, []byte(`{"type":"gemini-cli","project_ids":["project-a","project-b"]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	primary := &coreauth.Auth{Provider: "gemini-cli", ID: "primary", FileName: "gemini-cli.json", Metadata: map[string]any{}, Attributes: map[string]string{"path": authPath}}
+	secondary := &coreauth.Auth{Provider: "gemini-cli", ID: "secondary", FileName: "project-b.json", Metadata: map[string]any{}, Attributes: map[string]string{"path": authPath, "runtime_only": "true"}}
+	coreauth.MarkPluginVirtualAuth(primary, authPath, 0)
+	coreauth.MarkPluginVirtualAuth(secondary, authPath, 1)
+	registeredPrimary, _ := manager.Register(context.Background(), primary)
+	_, _ = manager.Register(context.Background(), secondary)
+	scheduler := &accountInspectionScheduler{h: &Handler{authManager: manager}}
+	if err := scheduler.executeAction(context.Background(), accountFromAuth(registeredPrimary).baseResult(), accountInspectionActionDelete); !errors.Is(err, errAccountInspectionSharedSourceDelete) {
+		t.Fatalf("executeAction(delete) error = %v, want shared-source rejection", err)
+	}
+	if _, err := os.Stat(authPath); err != nil {
+		t.Fatalf("shared source file was removed: %v", err)
+	}
+}
+
+func TestPluginVirtualInspectionErrorStaysOnTargetIdentity(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "gemini-cli.json")
+	if err := os.WriteFile(authPath, []byte(`{"type":"gemini-cli","project_ids":["project-a","project-b"]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	primary := &coreauth.Auth{Provider: "gemini-cli", ID: "primary", FileName: "gemini-cli.json", Metadata: map[string]any{"project_id": "project-a"}, Attributes: map[string]string{"path": authPath}}
+	secondary := &coreauth.Auth{Provider: "gemini-cli", ID: "secondary", FileName: "project-b.json", Metadata: map[string]any{"project_id": "project-b"}, Attributes: map[string]string{"path": authPath, "runtime_only": "true"}}
+	coreauth.MarkPluginVirtualAuth(primary, authPath, 0)
+	coreauth.MarkPluginVirtualAuth(secondary, authPath, 1)
+	registeredPrimary, _ := manager.Register(context.Background(), primary)
+	registeredSecondary, _ := manager.Register(context.Background(), secondary)
+	scheduler := &accountInspectionScheduler{h: &Handler{authManager: manager}}
+	scheduler.syncInspectionAuthError(context.Background(), accountFromAuth(registeredSecondary), "inspection_probe_error", "project-b failed", 0)
+
+	gotPrimary, _ := manager.GetByID(registeredPrimary.ID)
+	gotSecondary, _ := manager.GetByID(registeredSecondary.ID)
+	if gotPrimary.LastError != nil || gotPrimary.Status == coreauth.StatusError {
+		t.Fatalf("primary auth was polluted: %#v", gotPrimary)
+	}
+	if gotSecondary.LastError == nil || gotSecondary.LastError.Code != "inspection_probe_error" || gotSecondary.Status != coreauth.StatusError {
+		t.Fatalf("secondary auth error = %#v, want scoped inspection error", gotSecondary)
+	}
+	raw, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(raw), "last_error") {
+		t.Fatalf("shared source contains identity-local error: %s", raw)
+	}
+}
+
+func TestEnablePreservesNonInspectionLastError(t *testing.T) {
+	auth := &coreauth.Auth{
+		Disabled:    true,
+		Status:      coreauth.StatusDisabled,
+		LastError:   &coreauth.Error{Code: "upstream_refresh_error", Message: "refresh failed"},
+		Metadata:    map[string]any{"last_error": map[string]any{"code": "upstream_refresh_error", "message": "refresh failed"}},
+		Unavailable: true,
+	}
+	setAuthInspectionDisabledState(auth, false)
+	if auth.Disabled || auth.Status != coreauth.StatusError || !auth.Unavailable {
+		t.Fatalf("enabled auth state = disabled:%v status:%q unavailable:%v", auth.Disabled, auth.Status, auth.Unavailable)
+	}
+	if auth.LastError == nil || auth.LastError.Code != "upstream_refresh_error" {
+		t.Fatalf("LastError = %#v, want preserved upstream error", auth.LastError)
+	}
+	if _, ok := auth.Metadata["last_error"]; !ok {
+		t.Fatal("metadata last_error was removed")
+	}
+}
+
 func TestQuotaSuccessStateIncludesParserMetadata(t *testing.T) {
 	state := quotaSuccessState(map[string]any{"rawShapeHash": jsonShapeHash(`{"a":1,"items":[{"b":true}]}`)})
 	if state["schemaVersion"] != 2 || state["parserVersion"] != accountInspectionQuotaParserVersion || state["status"] != "success" {
@@ -892,76 +1050,6 @@ func TestBuildAntigravityGroupsCanonicalizesLatestGroups(t *testing.T) {
 	used := antigravityUsedPercent(groups, accountInspectionAntigravityQuotaModeClaudeGpt)
 	if used == nil || math.Abs(*used-0.85005) > 0.0001 {
 		t.Fatalf("claude-gpt used percent = %v, want about 0.85005", used)
-	}
-}
-
-func TestBuildGeminiCLIQuotaBucketsGroupsLatestModels(t *testing.T) {
-	body := `{
-		"buckets": [
-			{"modelId": "gemini-2.5-flash-lite_vertex", "tokenType": "input", "remainingFraction": 0.8, "remainingAmount": "80", "resetTime": "2026-06-22T01:00:00Z"},
-			{"model_id": "gemini-3-flash-preview", "token_type": "input", "remaining_fraction": 0.6, "remaining_amount": 60, "reset_time": "2026-06-22T02:00:00Z"},
-			{"modelId": "gemini-2.5-flash", "tokenType": "input", "remainingFraction": 0.4, "remainingAmount": 40, "resetTime": "2026-06-22T03:00:00Z"},
-			{"modelId": "gemini-3.1-pro-preview", "tokenType": "output", "remainingFraction": 0.2, "remainingAmount": 20, "resetTime": "2026-06-22T04:00:00Z"},
-			{"modelId": "gemini-2.0-flash", "tokenType": "input", "remainingFraction": 0}
-		]
-	}`
-
-	buckets, used, err := buildGeminiCLIQuotaBuckets(body)
-	if err != nil {
-		t.Fatalf("buildGeminiCLIQuotaBuckets() error = %v", err)
-	}
-	if len(buckets) != 3 {
-		t.Fatalf("buckets len = %d, want 3: %#v", len(buckets), buckets)
-	}
-	if buckets[0]["id"] != "gemini-flash-lite-series-input" || buckets[1]["id"] != "gemini-flash-series-input" || buckets[2]["id"] != "gemini-pro-series-output" {
-		t.Fatalf("bucket order/ids = %#v", buckets)
-	}
-	if buckets[1]["remainingFraction"] != 0.6 {
-		t.Fatalf("flash series remaining = %#v, want preferred 0.6", buckets[1]["remainingFraction"])
-	}
-	modelIDs, ok := buckets[1]["modelIds"].([]string)
-	if !ok || len(modelIDs) != 2 || modelIDs[0] != "gemini-3-flash-preview" || modelIDs[1] != "gemini-2.5-flash" {
-		t.Fatalf("flash series modelIds = %#v", buckets[1]["modelIds"])
-	}
-	if used == nil || math.Abs(*used-80) > 0.000001 {
-		t.Fatalf("used = %v, want 80", used)
-	}
-}
-
-func TestBuildGeminiCLISubscriptionReadsPaidTierCredits(t *testing.T) {
-	payload := map[string]any{
-		"currentTier": map[string]any{
-			"id":   "free-tier",
-			"name": "Free",
-		},
-		"paidTier": map[string]any{
-			"id": "g1-ultra-tier",
-			"availableCredits": []any{
-				map[string]any{"creditType": "OTHER", "creditAmount": float64(5)},
-				map[string]any{"creditType": "GOOGLE_ONE_AI", "creditAmount": "123"},
-			},
-		},
-	}
-
-	subscription := buildGeminiCLISubscription(payload)
-	if subscription["plan"] != "ultra" || subscription["tierId"] != "g1-ultra-tier" || subscription["tierLabel"] != "Google One AI Ultra" {
-		t.Fatalf("subscription = %#v, want ultra tier", subscription)
-	}
-	if subscription["creditBalance"] != float64(123) {
-		t.Fatalf("creditBalance = %#v, want 123", subscription["creditBalance"])
-	}
-}
-
-func TestGeminiCLIProjectIDReadsPluginMetadata(t *testing.T) {
-	auth := &coreauth.Auth{
-		Provider: "gemini-cli",
-		Attributes: map[string]string{
-			"gemini_virtual_project": "project-a, project-b",
-		},
-	}
-
-	if got := geminiCLIProjectID(auth); got != "project-a" {
-		t.Fatalf("geminiCLIProjectID() = %q, want project-a", got)
 	}
 }
 
@@ -1211,6 +1299,56 @@ func TestBuildXAIBillingSummarySupportsWeeklyCreditsShape(t *testing.T) {
 	}
 	if usage[1]["usagePercent"] != 82.25 {
 		t.Fatalf("second usagePercent = %#v, want 82.25", usage[1]["usagePercent"])
+	}
+}
+
+func TestXAIPlanTypeFromMonthlyBilling(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "free missing limit", body: `{"config": {}}`, want: "free"},
+		{name: "free ignores on demand cap", body: `{"config": {"onDemandCap": {"val": 20000}}}`, want: "free"},
+		{name: "free zero limit", body: `{"config": {"monthlyLimit": {"val": 0}}}`, want: "free"},
+		{name: "supergrok", body: `{"config": {"monthlyLimit": {"val": 15000}}}`, want: "supergrok"},
+		{name: "x premium plus", body: `{"config": {"monthlyLimit": {"val": 20000}}}`, want: "x-premium-plus"},
+		{name: "supergrok heavy", body: `{"config": {"monthlyLimit": {"val": 150000}}}`, want: "supergrok-heavy"},
+		{name: "unknown paid", body: `{"config": {"monthlyLimit": {"val": 99000}}}`, want: "paid-unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, known := xaiPlanTypeFromBillingBody(http.StatusOK, tt.body)
+			if !known || got != tt.want {
+				t.Fatalf("xaiPlanTypeFromBillingBody() = %q, %v; want %q, true", got, known, tt.want)
+			}
+		})
+	}
+	if got, known := xaiPlanTypeFromBillingBody(http.StatusUnauthorized, `{"config": {}}`); known || got != "" {
+		t.Fatalf("failed billing inferred plan = %q, %v", got, known)
+	}
+}
+
+func TestXAISummaryUsedPercentUsesFreeQuotaOnlyForFreePlan(t *testing.T) {
+	freeQuota := map[string]any{"usedTokens": 75.0, "limitTokens": 100.0, "exhausted": false}
+	free := emptyXAIBillingSummary()
+	free["planType"] = "free"
+	free["freeQuota"] = freeQuota
+	if got := xaiSummaryUsedPercent(free); got == nil || *got != 75 {
+		t.Fatalf("free used percent = %v, want 75", got)
+	}
+	paid := emptyXAIBillingSummary()
+	paid["planType"] = "x-premium-plus"
+	paid["freeQuota"] = map[string]any{"exhausted": true}
+	if got := xaiSummaryUsedPercent(paid); got != nil {
+		t.Fatalf("paid free-model exhaustion used percent = %v, want nil", got)
+	}
+}
+
+func TestAccountInspectionDeepProbesUnknownXAIQuota(t *testing.T) {
+	decision := accountInspectionDecision{Action: accountInspectionActionKeep}
+	if !accountInspectionShouldDeepProbe(decision) {
+		t.Fatal("unknown xAI quota should allow an explicitly enabled deep probe")
 	}
 }
 

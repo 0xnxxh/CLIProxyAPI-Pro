@@ -17,6 +17,7 @@ jobs:
       target_release_tag: ${{ steps.compare.outputs.target_release_tag }}
       current_management_tag: ${{ steps.compare.outputs.current_management_tag }}
       upstream_tag: ${{ steps.compare.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.compare.outputs.upstream_sha }}
       upstream_base_version: ${{ steps.compare.outputs.upstream_base_version }}
       build_version: ${{ steps.compare.outputs.build_version }}
 
@@ -50,6 +51,7 @@ jobs:
             echo "No upstream latest release found." >&2
             exit 1
           fi
+          upstream_sha="$(gh api "repos/${UPSTREAM_REPO}/commits/${upstream_tag}" --jq '.sha')"
 
           if [ -z "${target_release_tag}" ]; then
             echo "No current Pro release found. Management-only update will wait for the core release workflow."
@@ -57,6 +59,7 @@ jobs:
             echo "target_release_tag=" >> "${GITHUB_OUTPUT}"
             echo "current_management_tag=" >> "${GITHUB_OUTPUT}"
             echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+            echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
             echo "upstream_base_version=$(normalize_version "${upstream_tag}")" >> "${GITHUB_OUTPUT}"
             echo "build_version=v$(normalize_version "${upstream_tag}")-pro" >> "${GITHUB_OUTPUT}"
             exit 0
@@ -86,6 +89,7 @@ jobs:
           echo "current_management_tag=${current_management_tag:-none}"
           echo "current_base_version=${current_base_version}"
           echo "upstream_tag=${upstream_tag}"
+          echo "upstream_sha=${upstream_sha}"
           echo "upstream_base_version=${upstream_base_version}"
           echo "build_version=${build_version}"
           echo "has_management_asset=${has_management_asset}"
@@ -94,12 +98,91 @@ jobs:
           echo "target_release_tag=${target_release_tag}" >> "${GITHUB_OUTPUT}"
           echo "current_management_tag=${current_management_tag}" >> "${GITHUB_OUTPUT}"
           echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
           echo "upstream_base_version=${upstream_base_version}" >> "${GITHUB_OUTPUT}"
           echo "build_version=${build_version}" >> "${GITHUB_OUTPUT}"
           echo "should_release=${should_release}" >> "${GITHUB_OUTPUT}"
 
-  build-and-release:
+  validate-repository:
     needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Set up Go for actionlint
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install actionlint
+        env:
+          GOBIN: ${{ runner.temp }}/validation-bin
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "${GOBIN}" >> "${GITHUB_PATH}"
+
+      - name: Validate repository sources
+        env:
+          VALIDATION_REQUIRE_TOOLS: "1"
+        run: bash scripts/validation/repo.sh
+
+  validate-management:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout customizations
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: customizations-repo
+
+      - name: Checkout Management upstream release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: router-for-me/Cli-Proxy-API-Management-Center
+          ref: ${{ needs.check-version.outputs.upstream_sha }}
+          path: upstream
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: upstream/package.json
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('upstream/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Validate Management customization
+        env:
+          VERSION: ${{ needs.check-version.outputs.build_version }}
+        run: bash customizations-repo/scripts/validation/management.sh upstream
+
+  build-and-release:
+    needs:
+      - check-version
+      - validate-repository
+      - validate-management
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
@@ -108,17 +191,17 @@ jobs:
 
     steps:
       - name: Checkout customizations
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: customizations-repo
           fetch-depth: 0
           fetch-tags: true
 
       - name: Checkout management upstream release
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: router-for-me/Cli-Proxy-API-Management-Center
-          ref: ${{ needs.check-version.outputs.upstream_tag }}
+          ref: ${{ needs.check-version.outputs.upstream_sha }}
           path: upstream
           fetch-depth: 0
           fetch-tags: true
@@ -127,12 +210,12 @@ jobs:
         run: bash customizations-repo/cliproxyapi-pro-management/apply.sh upstream
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version-file: upstream/package.json
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('upstream/bun.lock') }}
@@ -239,7 +322,7 @@ jobs:
       contents: read
     steps:
       - name: Delete old workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
+        uses: Mattraks/delete-workflow-runs@0cf693bc9909e5e867ee8f27b813224ba862939c # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}

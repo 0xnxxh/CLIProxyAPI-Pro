@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/embeddedusage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -50,7 +51,7 @@ const (
 	accountInspectionProgressBroadcastGap   = 500 * time.Millisecond
 	accountInspectionMaxResultPageSize      = 500
 	accountInspectionMaxLogPageSize         = 500
-	accountInspectionQuotaParserVersion     = 4
+	accountInspectionQuotaParserVersion     = embeddedusage.XAIQuotaParserVersion
 )
 
 var accountInspectionWebSocketUpgrader = websocket.Upgrader{
@@ -195,11 +196,6 @@ const (
 const antigravityCodeAssistURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 
 const (
-	geminiCLIQuotaURL      = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
-	geminiCLICodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-)
-
-const (
 	accountInspectionStateIdle      accountInspectionRunState = "idle"
 	accountInspectionStateRunning   accountInspectionRunState = "running"
 	accountInspectionStatePaused    accountInspectionRunState = "paused"
@@ -213,6 +209,8 @@ const (
 const accountInspectionResultSnapshotVersion = 1
 
 var errAccountInspectionRestoredSnapshotReadOnly = errors.New("restored account inspection snapshot is read-only; run a new inspection first")
+var errAccountInspectionResultStale = errors.New("account inspection result is stale or no longer available")
+var errAccountInspectionSharedSourceDelete = errors.New("cannot delete one plugin virtual auth from a shared source file")
 
 type accountInspectionProgress struct {
 	Total     int `json:"total"`
@@ -293,6 +291,7 @@ type accountInspectionScheduler struct {
 	snapshotPath            string
 	trigger                 chan struct{}
 	mu                      sync.Mutex
+	actionMu                sync.Mutex
 	pause                   *sync.Cond
 	cancel                  context.CancelFunc
 	schedule                accountInspectionSchedule
@@ -304,6 +303,8 @@ type accountInspectionScheduler struct {
 	lastProgressBroadcastAt int64
 	xaiDeepProbeOnce        sync.Once
 	xaiDeepProbeGate        chan struct{}
+	runWG                   sync.WaitGroup
+	stopped                 bool
 }
 
 type accountInspectionAccount struct {
@@ -321,6 +322,7 @@ type accountInspectionAccount struct {
 type accountInspectionHTTPResult struct {
 	StatusCode int
 	Body       string
+	Header     http.Header
 }
 
 type accountInspectionDecision struct {
@@ -385,9 +387,37 @@ func (h *Handler) startAccountInspectionScheduler() {
 			embeddedusage.SetAuthRuntimeStateImportHandler(h.authManager.ApplyImportedRuntimeState)
 		}
 		scheduler.cleanupLegacyQuotaCaches(context.Background())
-		go scheduler.loop()
+		if h.lifecycleContext != nil {
+			h.lifecycleWG.Add(1)
+			go func() {
+				defer h.lifecycleWG.Done()
+				scheduler.loop(h.lifecycleContext)
+			}()
+		}
 	}
 	startRoutingPolicyController(h)
+}
+
+// Shutdown stops every background task owned by this management handler.
+// It is safe to call more than once.
+func (h *Handler) Shutdown() {
+	if h == nil {
+		return
+	}
+	h.shutdownOnce.Do(func() {
+		if h.lifecycleCancel != nil {
+			h.lifecycleCancel()
+		}
+		if scheduler := schedulerForHandler(h); scheduler != nil {
+			scheduler.shutdown()
+		}
+		h.lifecycleWG.Wait()
+		accountInspectionSchedulers.Delete(h)
+		stopRoutingPolicyController(h)
+		embeddedusage.SetAccountInspectionScheduleHandlers(nil, nil)
+		embeddedusage.SetAccountInspectionSnapshotHandlers(nil, nil)
+		embeddedusage.SetAuthRuntimeStateImportHandler(nil)
+	})
 }
 
 func schedulerForHandler(h *Handler) *accountInspectionScheduler {
@@ -1100,6 +1130,9 @@ func (s *accountInspectionScheduler) importSchedule(raw []byte) error {
 func (s *accountInspectionScheduler) update(schedule accountInspectionSchedule) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return fmt.Errorf("account inspection scheduler is shut down")
+	}
 	previousNextRunAt := s.schedule.NextRunAt
 	s.schedule = normalizeAccountInspectionSchedule(schedule)
 	if s.schedule.Enabled && previousNextRunAt > 0 && schedule.NextRunAt == 0 {
@@ -1115,12 +1148,14 @@ func (s *accountInspectionScheduler) update(schedule accountInspectionSchedule) 
 	return nil
 }
 
-func (s *accountInspectionScheduler) loop() {
+func (s *accountInspectionScheduler) loop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		s.maybeRunDue()
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
 		case <-s.trigger:
 		}
@@ -1131,16 +1166,26 @@ func (s *accountInspectionScheduler) maybeRunDue() {
 	s.mu.Lock()
 	schedule := s.schedule
 	running := s.isRunningLocked()
+	stopped := s.stopped
 	s.mu.Unlock()
-	if !schedule.Enabled || running || schedule.NextRunAt <= 0 || time.Now().UnixMilli() < schedule.NextRunAt {
+	if stopped || !schedule.Enabled || running || schedule.NextRunAt <= 0 || time.Now().UnixMilli() < schedule.NextRunAt {
 		return
 	}
 	go func() { _ = s.startRun(false) }()
 }
 
 func (s *accountInspectionScheduler) startRun(manual bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), accountInspectionMaxRunDuration)
+	baseContext := context.Background()
+	if s != nil && s.h != nil && s.h.lifecycleContext != nil {
+		baseContext = s.h.lifecycleContext
+	}
+	ctx, cancel := context.WithTimeout(baseContext, accountInspectionMaxRunDuration)
 	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		cancel()
+		return fmt.Errorf("account inspection scheduler is shut down")
+	}
 	if s.isRunningLocked() {
 		s.mu.Unlock()
 		cancel()
@@ -1159,16 +1204,36 @@ func (s *accountInspectionScheduler) startRun(manual bool) error {
 	s.status.Results = nil
 	s.healthCounts = accountInspectionHealthCounts{}
 	schedule := s.schedule
+	s.runWG.Add(2)
 	s.mu.Unlock()
 
 	go func() {
+		defer s.runWG.Done()
 		<-ctx.Done()
 		s.mu.Lock()
 		s.pause.Broadcast()
 		s.mu.Unlock()
 	}()
-	go s.run(ctx, cancel, schedule, manual)
+	go func() {
+		defer s.runWG.Done()
+		s.run(ctx, cancel, schedule, manual)
+	}()
 	return nil
+}
+
+func (s *accountInspectionScheduler) shutdown() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.stopped = true
+	cancel := s.cancel
+	s.pause.Broadcast()
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.runWG.Wait()
 }
 
 func (s *accountInspectionScheduler) appendLog(level string, message string) {
@@ -1275,8 +1340,12 @@ func (s *accountInspectionScheduler) inspectOne(ctx context.Context, item accoun
 	}
 	schedule := s.schedule
 	s.mu.Unlock()
+	boundItem, err := s.bindActionItemToSnapshot(item)
+	if err != nil {
+		return accountInspectionResult{}, err
+	}
 
-	result, _, runErr := s.executeSingleInspection(ctx, schedule.Settings, item)
+	result, _, runErr := s.executeSingleInspection(ctx, schedule.Settings, boundItem)
 	if runErr != nil {
 		s.appendLog("error", fmt.Sprintf("重新检查失败：%s", runErr.Error()))
 		return result, runErr
@@ -1314,16 +1383,20 @@ func (s *accountInspectionScheduler) refreshTokenNow(ctx context.Context, item a
 	if s.h == nil || s.h.authManager == nil {
 		return accountInspectionResult{}, fmt.Errorf("core auth manager unavailable")
 	}
+	boundItem, err := s.bindActionItemToSnapshot(item)
+	if err != nil {
+		return accountInspectionResult{}, err
+	}
 	auths, err := s.auths()
 	if err != nil {
 		return accountInspectionResult{}, err
 	}
 	for _, auth := range auths {
 		account := accountFromAuth(auth)
-		if item.Key != "" && account.Key != item.Key {
+		if boundItem.Key != "" && account.Key != boundItem.Key {
 			continue
 		}
-		if item.Key == "" && (account.FileName != item.FileName || account.AuthIndex != item.AuthIndex) {
+		if boundItem.Key == "" && (account.FileName != boundItem.FileName || account.AuthIndex != boundItem.AuthIndex) {
 			continue
 		}
 		result := account.baseResult()
@@ -2058,7 +2131,7 @@ func (s *accountInspectionScheduler) apiCall(ctx context.Context, auth *coreauth
 		}
 		defer resp.Body.Close()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-		return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw)}, nil
+		return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw), Header: resp.Header.Clone()}, nil
 	}
 	client := &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond, Transport: s.h.apiCallTransport(auth)}
 	resp, err := client.Do(req)
@@ -2067,7 +2140,7 @@ func (s *accountInspectionScheduler) apiCall(ctx context.Context, auth *coreauth
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-	return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw)}, nil
+	return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw), Header: resp.Header.Clone()}, nil
 }
 
 func accountInspectionShouldUseExecutorHTTPRequest(auth *coreauth.Auth) bool {
@@ -2460,78 +2533,45 @@ func (s *accountInspectionScheduler) inspectCodex(ctx context.Context, account a
 }
 
 func (s *accountInspectionScheduler) inspectGeminiCLI(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings) (accountInspectionDecision, *int, error) {
-	projectID := geminiCLIProjectID(account.Auth)
-	if projectID == "" {
-		return accountInspectionDecision{}, nil, fmt.Errorf("missing Gemini CLI project id")
+	attemptCtx, cancel := context.WithTimeout(ctx, time.Duration(settings.Timeout)*time.Millisecond)
+	result, serviceStatus, _, err := s.h.fetchAndPersistPluginQuota(attemptCtx, account.Auth)
+	cancel()
+	for attempt := 0; err != nil && attempt < settings.Retries && ctx.Err() == nil; attempt++ {
+		attemptCtx, cancel = context.WithTimeout(ctx, time.Duration(settings.Timeout)*time.Millisecond)
+		result, serviceStatus, _, err = s.h.fetchAndPersistPluginQuota(attemptCtx, account.Auth)
+		cancel()
 	}
-	resp, err := s.withRetry(ctx, settings.Retries, func() (accountInspectionHTTPResult, error) {
-		return s.apiCall(ctx, account.Auth, http.MethodPost, geminiCLIQuotaURL, map[string]string{
-			"Content-Type": "application/json",
-		}, `{"project":"`+escapeJSONString(projectID)+`"}`, settings.Timeout)
-	})
-	status := intPtr(resp.StatusCode)
+	upstreamStatus := result.UpstreamStatus
 	if err != nil {
-		return accountInspectionDecision{}, status, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if isAccountErrorStatus(resp.StatusCode) {
-			return withInspectionHTTPErrorDetail(authErrorDecision(account, resp.StatusCode), resp.Body), status, nil
+		status := upstreamStatus
+		if status == 0 {
+			status = serviceStatus
 		}
-		return accountInspectionDecision{}, status, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	buckets, used, err := buildGeminiCLIQuotaBuckets(resp.Body)
-	if err != nil {
-		return accountInspectionDecision{}, status, err
-	}
-	quotaState := map[string]any{
-		"buckets":      buckets,
-		"projectId":    projectID,
-		"rawShapeHash": jsonShapeHash(resp.Body),
-	}
-	if subscription := s.fetchGeminiCLISubscription(ctx, account, projectID, settings); subscription != nil {
-		quotaState["subscription"] = subscription
-		if plan := stringFromAny(subscription["plan"]); plan != "" {
-			quotaState["plan"] = plan
-			quotaState["planType"] = plan
+		if isAccountErrorStatus(upstreamStatus) {
+			return authErrorDecision(account, upstreamStatus), intPtr(upstreamStatus), nil
 		}
-		if tierID := stringFromAny(subscription["tierId"]); tierID != "" {
-			quotaState["tierId"] = tierID
-		}
-		if tierLabel := stringFromAny(subscription["tierLabel"]); tierLabel != "" {
-			quotaState["tierLabel"] = tierLabel
-		}
-		if creditBalance, ok := floatFromAny(subscription["creditBalance"]); ok {
-			quotaState["creditBalance"] = creditBalance
-		}
+		return accountInspectionDecision{}, intPtr(status), err
 	}
-	s.persistQuotaState(ctx, account, quotaSuccessState(quotaState))
-	return quotaDecision(account, used, len(buckets) > 0, settings.UsedPercentThreshold), status, nil
+	if errCleanup := s.cleanupLegacyQuotaCacheFromAuth(ctx, account); errCleanup != nil {
+		s.appendLog("warning", fmt.Sprintf("%s 旧认证文件配额缓存清理失败：%s", account.identity(), errCleanup.Error()))
+	}
+	used, hasQuota := quotaSnapshotMaxUsedPercent(result.Snapshot)
+	return quotaDecision(account, used, hasQuota, settings.UsedPercentThreshold), intPtr(http.StatusOK), nil
 }
 
-func (s *accountInspectionScheduler) fetchGeminiCLISubscription(ctx context.Context, account accountInspectionAccount, projectID string, settings accountInspectionSettings) map[string]any {
-	body := map[string]any{
-		"cloudaicompanionProject": projectID,
-		"metadata": map[string]any{
-			"ideType":     "IDE_UNSPECIFIED",
-			"platform":    "PLATFORM_UNSPECIFIED",
-			"pluginType":  "GEMINI",
-			"duetProject": projectID,
-		},
+func quotaSnapshotMaxUsedPercent(snapshot pluginapi.QuotaSnapshot) (*float64, bool) {
+	usedValues := make([]float64, 0, len(snapshot.Items))
+	for _, item := range snapshot.Items {
+		if item.UsedPercent != nil {
+			usedValues = append(usedValues, math.Max(0, math.Min(100, *item.UsedPercent)))
+			continue
+		}
+		if item.RemainingFraction != nil {
+			remaining := normalizeFraction(*item.RemainingFraction)
+			usedValues = append(usedValues, math.Max(0, math.Min(100, (1-remaining)*100)))
+		}
 	}
-	raw, _ := json.Marshal(body)
-	resp, err := s.withRetry(ctx, settings.Retries, func() (accountInspectionHTTPResult, error) {
-		return s.apiCall(ctx, account.Auth, http.MethodPost, geminiCLICodeAssistURL, map[string]string{
-			"Content-Type": "application/json",
-		}, string(raw), settings.Timeout)
-	})
-	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil
-	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(resp.Body), &payload); err != nil {
-		return nil
-	}
-	return buildGeminiCLISubscription(payload)
+	return maxFloatPtr(usedValues), len(snapshot.Items) > 0
 }
 
 func (s *accountInspectionScheduler) inspectKimi(ctx context.Context, account accountInspectionAccount, settings accountInspectionSettings) (accountInspectionDecision, *int, error) {
@@ -2562,6 +2602,12 @@ func (s *accountInspectionScheduler) inspectXAI(ctx context.Context, account acc
 	monthlyBilling, monthlyResp, monthlyErr := s.fetchXAIBillingSummary(ctx, account, settings, xaiBillingURL(), headers)
 	status := firstInspectionStatus(monthlyResp.StatusCode, weeklyResp.StatusCode)
 	billing := mergeXAIBillingSummaries(weeklyBilling, monthlyBilling)
+	if planType, known := xaiPlanTypeFromBillingBody(monthlyResp.StatusCode, monthlyResp.Body); known {
+		if billing == nil {
+			billing = emptyXAIBillingSummary()
+		}
+		billing["planType"] = planType
+	}
 	if billing == nil {
 		if isAccountErrorStatus(weeklyResp.StatusCode) {
 			return withInspectionHTTPErrorDetail(authErrorDecision(account, weeklyResp.StatusCode), weeklyResp.Body), status, nil
@@ -2569,6 +2615,9 @@ func (s *accountInspectionScheduler) inspectXAI(ctx context.Context, account acc
 		if isAccountErrorStatus(monthlyResp.StatusCode) {
 			return withInspectionHTTPErrorDetail(authErrorDecision(account, monthlyResp.StatusCode), monthlyResp.Body), status, nil
 		}
+	}
+	billing = mergeCachedXAIFreeQuota(ctx, account, billing)
+	if billing == nil {
 		if weeklyErr != nil {
 			return accountInspectionDecision{}, status, weeklyErr
 		}
@@ -2592,7 +2641,7 @@ func (s *accountInspectionScheduler) inspectXAI(ctx context.Context, account acc
 }
 
 func accountInspectionShouldDeepProbe(decision accountInspectionDecision) bool {
-	if decision.UsedPercent == nil || decision.IsQuota {
+	if decision.IsQuota {
 		return false
 	}
 	return decision.Action == accountInspectionActionKeep || decision.Action == accountInspectionActionEnable
@@ -2622,6 +2671,7 @@ func (s *accountInspectionScheduler) applyXAIDeepProbe(ctx context.Context, acco
 			"Connection":    "Keep-Alive",
 		}, buildXAIDeepProbeBody(model), settings.Timeout)
 	})
+	observeAccountXAIQuota(ctx, account, model, resp)
 	var probeStatus *int
 	if resp.StatusCode != 0 {
 		probeStatus = intPtr(resp.StatusCode)
@@ -2985,10 +3035,23 @@ func setAuthInspectionDisabledState(auth *coreauth.Auth, disabled bool) {
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "disabled by scheduled account inspection"
 	} else {
-		auth.Status = coreauth.StatusActive
-		auth.StatusMessage = ""
-		auth.Unavailable = false
-		syncAuthInspectionLastError(auth, nil)
+		code := authInspectionLastErrorCode(auth)
+		if code != "" && !isInspectionAuthErrorCode(code) {
+			auth.Status = coreauth.StatusError
+			auth.Unavailable = true
+			if auth.LastError != nil {
+				auth.StatusMessage = strings.TrimSpace(auth.LastError.Message)
+			} else if raw, ok := auth.Metadata["last_error"].(map[string]any); ok {
+				auth.StatusMessage = strings.TrimSpace(stringFromAny(raw["message"]))
+			}
+		} else {
+			auth.Status = coreauth.StatusActive
+			auth.StatusMessage = ""
+			auth.Unavailable = false
+			if isInspectionAuthErrorCode(code) {
+				syncAuthInspectionLastError(auth, nil)
+			}
+		}
 	}
 	auth.UpdatedAt = time.Now()
 }
@@ -3195,15 +3258,46 @@ func (s *accountInspectionScheduler) updateInspectionAuth(ctx context.Context, a
 		return nil
 	}
 	mutate(auth)
-	_, err := s.h.authManager.Update(ctx, auth)
-	return err
+	updated, err := s.h.authManager.Update(ctx, auth)
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return fmt.Errorf("auth not found")
+	}
+	return nil
+}
+
+func (s *accountInspectionScheduler) updateInspectionErrorAuth(ctx context.Context, authIndex string, mutate func(*coreauth.Auth)) error {
+	if s == nil || s.h == nil || s.h.authManager == nil {
+		return fmt.Errorf("core auth manager unavailable")
+	}
+	auth := s.h.authByIndex(authIndex)
+	if auth == nil {
+		return fmt.Errorf("auth not found")
+	}
+	if !coreauth.IsPluginVirtualAuth(auth) {
+		return s.updateInspectionAuth(ctx, authIndex, mutate)
+	}
+	if mutate == nil {
+		return nil
+	}
+	mutate(auth)
+	updated, err := s.h.authManager.Update(ctx, auth)
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return fmt.Errorf("auth not found")
+	}
+	return nil
 }
 
 func (s *accountInspectionScheduler) syncInspectionAuthError(ctx context.Context, account accountInspectionAccount, code string, message string, status int) {
 	if s == nil || s.h == nil || s.h.authManager == nil || account.AuthIndex == "" {
 		return
 	}
-	err := s.updateInspectionAuth(ctx, account.AuthIndex, func(auth *coreauth.Auth) {
+	err := s.updateInspectionErrorAuth(ctx, account.AuthIndex, func(auth *coreauth.Auth) {
 		auth.Status = coreauth.StatusError
 		auth.StatusMessage = message
 		auth.Unavailable = true
@@ -3226,7 +3320,7 @@ func (s *accountInspectionScheduler) clearInspectionAuthError(ctx context.Contex
 	if !isInspectionAuthErrorCode(authInspectionLastErrorCode(auth)) {
 		return
 	}
-	err := s.updateInspectionAuth(ctx, account.AuthIndex, func(auth *coreauth.Auth) {
+	err := s.updateInspectionErrorAuth(ctx, account.AuthIndex, func(auth *coreauth.Auth) {
 		if auth.Disabled {
 			auth.Status = coreauth.StatusDisabled
 		} else {
@@ -3368,6 +3462,39 @@ func (item accountInspectionActionItem) toResult() accountInspectionResult {
 	}
 }
 
+func accountInspectionActionItemFromResult(result accountInspectionResult, action accountInspectionAction) accountInspectionActionItem {
+	return accountInspectionActionItem{
+		Key:         result.Key,
+		Provider:    result.Provider,
+		FileName:    result.FileName,
+		DisplayName: result.DisplayName,
+		Email:       result.Email,
+		Name:        result.Name,
+		AuthIndex:   result.AuthIndex,
+		Disabled:    result.Disabled,
+		Action:      action,
+	}
+}
+
+func (s *accountInspectionScheduler) bindActionItemToSnapshot(item accountInspectionActionItem) (accountInspectionActionItem, error) {
+	if s == nil {
+		return accountInspectionActionItem{}, fmt.Errorf("account inspection scheduler unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, result := range s.status.Results {
+		if item.Key != "" {
+			if result.Key != item.Key {
+				continue
+			}
+		} else if result.FileName != item.FileName || result.AuthIndex != item.AuthIndex {
+			continue
+		}
+		return accountInspectionActionItemFromResult(result, item.Action), nil
+	}
+	return accountInspectionActionItem{}, errAccountInspectionResultStale
+}
+
 func (s *accountInspectionScheduler) removeInspectionResultLocked(result accountInspectionResult) bool {
 	for index, current := range s.status.Results {
 		if !sameAccountInspectionResult(current, result) {
@@ -3416,7 +3543,18 @@ func (s *accountInspectionScheduler) executeManualActions(ctx context.Context, i
 	if restoredSnapshot {
 		return nil, errAccountInspectionRestoredSnapshotReadOnly
 	}
-	executableItems := dedupeExecutionActionItems(items)
+	boundItems := make([]accountInspectionActionItem, 0, len(items))
+	for _, item := range items {
+		if item.Action == accountInspectionActionKeep || item.Action == "" {
+			continue
+		}
+		boundItem, err := s.bindActionItemToSnapshot(item)
+		if err != nil {
+			return nil, err
+		}
+		boundItems = append(boundItems, boundItem)
+	}
+	executableItems := dedupeExecutionActionItems(boundItems)
 	outcomes := make([]accountInspectionActionOutcome, len(executableItems))
 	executedResults := make([]accountInspectionResult, len(executableItems))
 	runAccountInspectionWorkers(len(executableItems), accountInspectionMaxDeleteWorkers, nil, func(index int) bool {
@@ -3654,17 +3792,64 @@ func (s *accountInspectionScheduler) executeAction(ctx context.Context, result a
 	if s.h == nil || s.h.authManager == nil {
 		return fmt.Errorf("core auth manager unavailable")
 	}
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
+	auth, err := s.actionAuthForResult(result)
+	if err != nil {
+		return err
+	}
 	switch action {
 	case accountInspectionActionDisable, accountInspectionActionEnable:
 		return s.updateInspectionAuth(ctx, result.AuthIndex, func(auth *coreauth.Auth) {
 			setAuthInspectionDisabledState(auth, action == accountInspectionActionDisable)
 		})
 	case accountInspectionActionDelete:
-		_, _, err := s.h.deleteAuthFileByName(ctx, result.FileName)
+		if s.pluginVirtualSourceAuthCount(auth) > 1 {
+			return errAccountInspectionSharedSourceDelete
+		}
+		_, _, err := s.h.deleteAuthFileByName(ctx, accountFromAuth(auth).FileName)
 		return err
 	default:
 		return fmt.Errorf("unsupported action %s", action)
 	}
+}
+
+func (s *accountInspectionScheduler) actionAuthForResult(result accountInspectionResult) (*coreauth.Auth, error) {
+	if s == nil || s.h == nil || s.h.authManager == nil || strings.TrimSpace(result.AuthIndex) == "" {
+		return nil, errAccountInspectionResultStale
+	}
+	auth := s.h.authByIndex(result.AuthIndex)
+	if auth == nil {
+		return nil, errAccountInspectionResultStale
+	}
+	account := accountFromAuth(auth)
+	if result.Key != "" && result.Key != account.Key {
+		return nil, errAccountInspectionResultStale
+	}
+	if result.FileName != "" && result.FileName != account.FileName {
+		return nil, errAccountInspectionResultStale
+	}
+	if result.Provider != "" && !strings.EqualFold(strings.TrimSpace(result.Provider), account.Provider) {
+		return nil, errAccountInspectionResultStale
+	}
+	return auth, nil
+}
+
+func (s *accountInspectionScheduler) pluginVirtualSourceAuthCount(auth *coreauth.Auth) int {
+	if s == nil || s.h == nil || s.h.authManager == nil || auth == nil || !coreauth.IsPluginVirtualAuth(auth) {
+		return 0
+	}
+	sourcePath := pluginVirtualSourcePath(auth)
+	if sourcePath == "" {
+		return 0
+	}
+	count := 0
+	for _, candidate := range s.h.authManager.List() {
+		if candidate != nil && coreauth.IsPluginVirtualAuth(candidate) && sameAuthSourcePath(pluginVirtualSourcePath(candidate), sourcePath) {
+			count++
+		}
+	}
+	return count
 }
 
 func summarizeAccountInspection(totalFiles int, probeSetCount int, accounts []accountInspectionAccount, results []accountInspectionResult) accountInspectionSummary {
@@ -3898,7 +4083,7 @@ func persistQuotaState(ctx context.Context, account accountInspectionAccount, st
 		strings.ToLower(strings.TrimSpace(account.Name)),
 	}, "|")
 	fingerprint := sha256.Sum256([]byte(fingerprintSource))
-	return embeddedusage.SetQuotaCache(ctx, embeddedusage.QuotaCacheEntry{
+	entry := embeddedusage.QuotaCacheEntry{
 		ID:                  account.Provider + ":" + account.FileName,
 		Provider:            account.Provider,
 		FileName:            account.FileName,
@@ -3909,7 +4094,11 @@ func persistQuotaState(ctx context.Context, account accountInspectionAccount, st
 		ObservedAt:          observedAt,
 		AccessedAt:          now,
 		Version:             version,
-	})
+	}
+	if strings.EqualFold(strings.TrimSpace(account.Provider), "xai") {
+		return embeddedusage.MergeXAIQuotaCache(ctx, entry)
+	}
+	return embeddedusage.SetQuotaCache(ctx, entry)
 }
 
 func buildAntigravityGroups(body string) ([]map[string]any, error) {
@@ -4452,279 +4641,6 @@ func codexResetLabel(window map[string]any) string {
 	return "-"
 }
 
-func geminiCLIProjectID(auth *coreauth.Auth) string {
-	for _, key := range []string{"project_id", "projectId", "gemini_virtual_project"} {
-		if value := firstNonEmptyAuthValue(auth, key); value != "" {
-			if strings.Contains(value, ",") {
-				parts := strings.Split(value, ",")
-				for _, part := range parts {
-					if trimmed := strings.TrimSpace(part); trimmed != "" {
-						return trimmed
-					}
-				}
-				continue
-			}
-			return value
-		}
-	}
-	return ""
-}
-
-func buildGeminiCLIQuotaBuckets(body string) ([]map[string]any, *float64, error) {
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(body), &payload); err != nil {
-		return nil, nil, err
-	}
-	rawBuckets := anySlice(payload["buckets"])
-	if len(rawBuckets) == 0 {
-		return nil, nil, fmt.Errorf("empty Gemini CLI quota buckets")
-	}
-	type geminiBucketGroup struct {
-		ID                       string
-		Label                    string
-		TokenType                string
-		ModelIDs                 []string
-		PreferredModelID         string
-		PreferredRemaining       *float64
-		PreferredRemainingAmount any
-		PreferredResetTime       string
-		FallbackRemaining        *float64
-		FallbackRemainingAmount  any
-		FallbackResetTime        string
-	}
-	groups := make(map[string]*geminiBucketGroup)
-	for _, rawBucket := range rawBuckets {
-		bucket, ok := rawBucket.(map[string]any)
-		if !ok {
-			continue
-		}
-		modelID := normalizeGeminiCLIModelID(stringFromAny(firstAny(bucket, "modelId", "model_id")))
-		if modelID == "" || isIgnoredGeminiCLIModel(modelID) {
-			continue
-		}
-		tokenType := stringFromAny(firstAny(bucket, "tokenType", "token_type"))
-		groupID, label, preferredModelID := geminiCLIQuotaGroupMeta(modelID)
-		mapKey := groupID + "::" + tokenType
-		group := groups[mapKey]
-		if group == nil {
-			group = &geminiBucketGroup{ID: groupID, Label: label, TokenType: tokenType, PreferredModelID: preferredModelID}
-			groups[mapKey] = group
-		}
-		group.ModelIDs = append(group.ModelIDs, modelID)
-		remaining := geminiCLIRemainingFraction(bucket)
-		remainingAmount := firstAny(bucket, "remainingAmount", "remaining_amount")
-		resetTime := stringFromAny(firstAny(bucket, "resetTime", "reset_time"))
-		group.FallbackRemaining = minFloatPtr(group.FallbackRemaining, remaining)
-		group.FallbackResetTime = pickEarlierResetTime(group.FallbackResetTime, resetTime)
-		if group.FallbackRemainingAmount == nil {
-			group.FallbackRemainingAmount = remainingAmount
-		}
-		if preferredModelID != "" && modelID == preferredModelID {
-			group.PreferredRemaining = remaining
-			group.PreferredRemainingAmount = remainingAmount
-			group.PreferredResetTime = resetTime
-		}
-	}
-	if len(groups) == 0 {
-		return nil, nil, fmt.Errorf("empty Gemini CLI quota buckets")
-	}
-	out := make([]map[string]any, 0, len(groups))
-	for _, group := range groups {
-		remaining := group.FallbackRemaining
-		remainingAmount := group.FallbackRemainingAmount
-		resetTime := group.FallbackResetTime
-		if group.PreferredRemaining != nil {
-			remaining = group.PreferredRemaining
-			remainingAmount = group.PreferredRemainingAmount
-			resetTime = group.PreferredResetTime
-		}
-		item := map[string]any{
-			"id":                geminiCLIQuotaBucketID(group.ID, group.TokenType),
-			"label":             group.Label,
-			"remainingFraction": floatPtrAny(remaining),
-			"remainingAmount":   normalizeGeminiCLIRemainingAmount(remainingAmount),
-			"resetTime":         emptyStringAsNil(resetTime),
-			"tokenType":         emptyStringAsNil(group.TokenType),
-			"modelIds":          uniqueStrings(group.ModelIDs),
-		}
-		out = append(out, item)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		leftOrder := geminiCLIQuotaGroupOrder(stringFromAny(out[i]["id"]))
-		rightOrder := geminiCLIQuotaGroupOrder(stringFromAny(out[j]["id"]))
-		if leftOrder != rightOrder {
-			return leftOrder < rightOrder
-		}
-		return stringFromAny(out[i]["id"]) < stringFromAny(out[j]["id"])
-	})
-	usedValues := make([]float64, 0, len(out))
-	for _, bucket := range out {
-		if remaining, ok := floatFromAny(bucket["remainingFraction"]); ok {
-			usedValues = append(usedValues, math.Max(0, math.Min(100, (1-normalizeFraction(remaining))*100)))
-		}
-	}
-	return out, maxFloatPtr(usedValues), nil
-}
-
-func normalizeGeminiCLIModelID(modelID string) string {
-	modelID = strings.TrimSpace(modelID)
-	return strings.TrimSuffix(modelID, "_vertex")
-}
-
-func isIgnoredGeminiCLIModel(modelID string) bool {
-	return modelID == "gemini-2.0-flash" || strings.HasPrefix(modelID, "gemini-2.0-flash-")
-}
-
-func geminiCLIQuotaGroupMeta(modelID string) (string, string, string) {
-	switch modelID {
-	case "gemini-2.5-flash-lite":
-		return "gemini-flash-lite-series", "Gemini Flash Lite Series", "gemini-2.5-flash-lite"
-	case "gemini-3-flash-preview", "gemini-2.5-flash":
-		return "gemini-flash-series", "Gemini Flash Series", "gemini-3-flash-preview"
-	case "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-2.5-pro":
-		return "gemini-pro-series", "Gemini Pro Series", "gemini-3.1-pro-preview"
-	default:
-		return modelID, modelID, modelID
-	}
-}
-
-func geminiCLIQuotaBucketID(groupID string, tokenType string) string {
-	if strings.TrimSpace(tokenType) == "" {
-		return groupID
-	}
-	return groupID + "-" + tokenType
-}
-
-func geminiCLIQuotaGroupOrder(id string) int {
-	normalized := normalizeWindowID(id)
-	switch {
-	case strings.HasPrefix(normalized, "gemini-flash-lite-series"):
-		return 0
-	case strings.HasPrefix(normalized, "gemini-flash-series"):
-		return 1
-	case strings.HasPrefix(normalized, "gemini-pro-series"):
-		return 2
-	default:
-		return math.MaxInt
-	}
-}
-
-func geminiCLIRemainingFraction(bucket map[string]any) *float64 {
-	if remaining, ok := floatFromAny(firstAny(bucket, "remainingFraction", "remaining_fraction")); ok {
-		normalized := normalizeFraction(remaining)
-		return &normalized
-	}
-	if remainingAmount, ok := floatFromAny(firstAny(bucket, "remainingAmount", "remaining_amount")); ok && remainingAmount <= 0 {
-		zero := 0.0
-		return &zero
-	}
-	if resetTime := stringFromAny(firstAny(bucket, "resetTime", "reset_time")); resetTime != "" {
-		zero := 0.0
-		return &zero
-	}
-	return nil
-}
-
-func normalizeGeminiCLIRemainingAmount(value any) any {
-	if value == nil {
-		return nil
-	}
-	if number, ok := floatFromAny(value); ok {
-		return number
-	}
-	if text := stringFromAny(value); text != "" {
-		return text
-	}
-	return nil
-}
-
-func buildGeminiCLISubscription(payload map[string]any) map[string]any {
-	if payload == nil {
-		return nil
-	}
-	currentTier := firstMap(payload, "currentTier")
-	if currentTier == nil {
-		currentTier = firstMap(payload, "current_tier")
-	}
-	paidTier := firstMap(payload, "paidTier")
-	if paidTier == nil {
-		paidTier = firstMap(payload, "paid_tier")
-	}
-	tier := currentTier
-	source := "current"
-	if stringFromAny(paidTier["id"]) != "" {
-		tier = paidTier
-		source = "paid"
-	}
-	tierID := stringFromAny(tier["id"])
-	tierName := stringFromAny(tier["name"])
-	if tierID == "" && tierName == "" {
-		return nil
-	}
-	subscription := map[string]any{
-		"plan":      geminiCLIPlanFromTierID(tierID),
-		"tierId":    emptyStringAsNil(tierID),
-		"tierLabel": emptyStringAsNil(geminiCLITierLabel(tierID, tierName)),
-		"tierName":  emptyStringAsNil(tierName),
-		"source":    source,
-	}
-	if balance, ok := geminiCLICreditBalance(tier); ok {
-		subscription["creditBalance"] = balance
-	}
-	return subscription
-}
-
-func geminiCLIPlanFromTierID(tierID string) string {
-	switch strings.ToLower(strings.TrimSpace(tierID)) {
-	case "free-tier":
-		return "free"
-	case "legacy-tier":
-		return "legacy"
-	case "standard-tier":
-		return "standard"
-	case "g1-pro-tier":
-		return "pro"
-	case "g1-ultra-tier":
-		return "ultra"
-	default:
-		return "unknown"
-	}
-}
-
-func geminiCLITierLabel(tierID string, tierName string) string {
-	if label := strings.TrimSpace(tierName); label != "" {
-		return label
-	}
-	switch strings.ToLower(strings.TrimSpace(tierID)) {
-	case "free-tier":
-		return "Free"
-	case "legacy-tier":
-		return "Legacy"
-	case "standard-tier":
-		return "Standard"
-	case "g1-pro-tier":
-		return "Google One AI Pro"
-	case "g1-ultra-tier":
-		return "Google One AI Ultra"
-	default:
-		return strings.TrimSpace(tierID)
-	}
-}
-
-func geminiCLICreditBalance(tier map[string]any) (float64, bool) {
-	for _, raw := range anySlice(firstAny(tier, "availableCredits", "available_credits")) {
-		credit, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		if !strings.EqualFold(stringFromAny(firstAny(credit, "creditType", "credit_type")), "GOOGLE_ONE_AI") {
-			continue
-		}
-		return floatFromAny(firstAny(credit, "creditAmount", "credit_amount"))
-	}
-	return 0, false
-}
-
 func formatUnixSeconds(seconds int64) string {
 	return time.Unix(seconds, 0).Format("01/02, 15:04")
 }
@@ -5006,6 +4922,19 @@ func firstNonEmptyXaiProductUsage(primary any, fallback any) any {
 }
 
 func xaiSummaryUsedPercent(summary map[string]any) *float64 {
+	if strings.EqualFold(strings.TrimSpace(stringFromAny(summary["planType"])), "free") {
+		freeQuota := firstMap(summary, "freeQuota", "free_quota")
+		if boolFromAny(freeQuota["exhausted"]) {
+			value := 100.0
+			return &value
+		}
+		if used, okUsed := floatFromAny(firstAny(freeQuota, "usedTokens", "used_tokens")); okUsed {
+			if limit, okLimit := floatFromAny(firstAny(freeQuota, "limitTokens", "limit_tokens")); okLimit && limit > 0 {
+				value := math.Max(0, math.Min(100, (used/limit)*100))
+				return &value
+			}
+		}
+	}
 	for _, key := range []string{"usagePercent", "usage_percent", "usedPercent", "used_percent", "onDemandUsedPercent", "on_demand_used_percent"} {
 		if value, ok := floatFromAny(summary[key]); ok {
 			return &value
@@ -5022,6 +4951,86 @@ func xaiSummaryUsedPercent(summary map[string]any) *float64 {
 		}
 	}
 	return maxFloatPtr(values)
+}
+
+const (
+	xaiSuperGrokLimitCents      = 15_000
+	xaiXPremiumPlusLimitCents   = 20_000
+	xaiSuperGrokHeavyLimitCents = 150_000
+)
+
+func emptyXAIBillingSummary() map[string]any {
+	return map[string]any{
+		"periodType":          "unknown",
+		"usagePercent":        nil,
+		"productUsage":        []map[string]any{},
+		"monthlyLimitCents":   nil,
+		"usedCents":           nil,
+		"includedUsedCents":   nil,
+		"onDemandCapCents":    nil,
+		"onDemandUsedCents":   nil,
+		"onDemandUsedPercent": nil,
+		"usedPercent":         nil,
+	}
+}
+
+func xaiPlanTypeFromBillingBody(status int, body string) (string, bool) {
+	if status < 200 || status >= 300 {
+		return "", false
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return "", false
+	}
+	config := firstMap(payload, "config")
+	if config == nil {
+		return "", false
+	}
+	limit, hasLimit := xaiCentValue(firstAny(config, "monthlyLimit", "monthly_limit"))
+	if !hasLimit || math.Round(limit) == 0 {
+		return "free", true
+	}
+	switch int64(math.Round(limit)) {
+	case xaiSuperGrokLimitCents:
+		return "supergrok", true
+	case xaiXPremiumPlusLimitCents:
+		return "x-premium-plus", true
+	case xaiSuperGrokHeavyLimitCents:
+		return "supergrok-heavy", true
+	default:
+		return "paid-unknown", true
+	}
+}
+
+func mergeCachedXAIFreeQuota(ctx context.Context, account accountInspectionAccount, billing map[string]any) map[string]any {
+	state, ok, err := embeddedusage.GetXAIQuotaState(ctx, account.FileName)
+	if err != nil || !ok {
+		return billing
+	}
+	cachedBilling := firstMap(state, "billing")
+	freeQuota := firstMap(cachedBilling, "freeQuota", "free_quota")
+	if freeQuota == nil {
+		return billing
+	}
+	if billing == nil {
+		billing = emptyXAIBillingSummary()
+	}
+	billing["freeQuota"] = freeQuota
+	return billing
+}
+
+func observeAccountXAIQuota(ctx context.Context, account accountInspectionAccount, model string, result accountInspectionHTTPResult) {
+	_ = embeddedusage.ObserveXAIQuotaResponse(ctx, embeddedusage.XAIQuotaObservation{
+		FileName:   account.FileName,
+		AuthIndex:  account.AuthIndex,
+		Email:      account.Email,
+		Label:      firstNonEmptyStringValue(account.Name, account.DisplayName),
+		Model:      model,
+		Status:     result.StatusCode,
+		Header:     result.Header,
+		Body:       []byte(result.Body),
+		ObservedAt: time.Now(),
+	})
 }
 
 func kimiLimitLabel(item map[string]any, detail map[string]any, window map[string]any, index int) map[string]any {
@@ -5768,7 +5777,7 @@ func (h *Handler) InspectOneAccount(c *gin.Context) {
 	snapshot := scheduler.snapshotForRequest(c)
 	if err != nil {
 		statusCode := http.StatusOK
-		if errors.Is(err, errAccountInspectionRestoredSnapshotReadOnly) {
+		if errors.Is(err, errAccountInspectionRestoredSnapshotReadOnly) || errors.Is(err, errAccountInspectionResultStale) {
 			statusCode = http.StatusConflict
 		}
 		c.JSON(statusCode, gin.H{"error": err.Error(), "result": result, "schedule": snapshot["schedule"], "status": snapshot["status"]})
@@ -5803,7 +5812,7 @@ func (h *Handler) RefreshAccountInspectionToken(c *gin.Context) {
 	snapshot := scheduler.snapshotForRequest(c)
 	if err != nil {
 		statusCode := http.StatusOK
-		if errors.Is(err, errAccountInspectionRestoredSnapshotReadOnly) {
+		if errors.Is(err, errAccountInspectionRestoredSnapshotReadOnly) || errors.Is(err, errAccountInspectionResultStale) {
 			statusCode = http.StatusConflict
 		}
 		c.JSON(statusCode, gin.H{"error": err.Error(), "result": result, "schedule": snapshot["schedule"], "status": snapshot["status"]})
@@ -5857,7 +5866,7 @@ func (h *Handler) ExecuteAccountInspectionActions(c *gin.Context) {
 	snapshot := scheduler.snapshotForRequest(c)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
-		if errors.Is(err, errAccountInspectionRestoredSnapshotReadOnly) {
+		if errors.Is(err, errAccountInspectionRestoredSnapshotReadOnly) || errors.Is(err, errAccountInspectionResultStale) {
 			statusCode = http.StatusConflict
 		}
 		c.JSON(statusCode, gin.H{

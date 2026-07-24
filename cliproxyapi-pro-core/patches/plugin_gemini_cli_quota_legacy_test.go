@@ -14,9 +14,10 @@ import (
 )
 
 type legacyGeminiCLIQuotaTestExecutor struct {
-	requests []*http.Request
-	planBody string
-	planCode int
+	requests  []*http.Request
+	quotaCode int
+	planBody  string
+	planCode  int
 }
 
 func (e *legacyGeminiCLIQuotaTestExecutor) Identifier() string { return legacyGeminiCLIProvider }
@@ -35,12 +36,20 @@ func (e *legacyGeminiCLIQuotaTestExecutor) CountTokens(context.Context, *coreaut
 func (e *legacyGeminiCLIQuotaTestExecutor) HttpRequest(_ context.Context, _ *coreauth.Auth, req *http.Request) (*http.Response, error) {
 	e.requests = append(e.requests, req)
 	if strings.HasSuffix(req.URL.String(), ":retrieveUserQuota") {
+		if e.quotaCode != 0 && e.quotaCode != http.StatusOK {
+			return &http.Response{
+				StatusCode: e.quotaCode,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":"quota"}`)),
+			}, nil
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
 			Body: io.NopCloser(bytes.NewBufferString(`{"buckets":[
 				{"modelId":"gemini-2.0-flash","remainingFraction":0.9},
-				{"modelId":"gemini-3.1-pro-preview","remainingFraction":0.75,"remainingAmount":42}
+				{"modelId":"gemini-4-pro-preview","remainingFraction":0.75,"remainingAmount":42},
+				{"modelId":"gemini-3.1-pro-preview","remainingFraction":0.25,"remainingAmount":21}
 			]}`)),
 		}, nil
 	}
@@ -57,6 +66,41 @@ func (e *legacyGeminiCLIQuotaTestExecutor) HttpRequest(_ context.Context, _ *cor
 		Header:     make(http.Header),
 		Body:       io.NopCloser(bytes.NewBufferString(responseBody)),
 	}, nil
+}
+
+func TestLegacyGeminiCLIProjectIDUsesFirstVirtualProject(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   legacyGeminiCLIProvider,
+		Attributes: map[string]string{"gemini_virtual_project": "project-a, project-b"},
+	}
+	if got := legacyGeminiCLIProjectID(auth); got != "project-a" {
+		t.Fatalf("legacyGeminiCLIProjectID() = %q, want project-a", got)
+	}
+}
+
+func TestLegacyGeminiCLIQuotaItemsInferExhaustedBucket(t *testing.T) {
+	items := legacyGeminiCLIQuotaItems(map[string]any{"buckets": []any{
+		map[string]any{"modelId": "gemini-4-pro-preview", "remainingAmount": float64(0), "resetTime": "2026-01-01T00:00:00Z"},
+	}})
+	if len(items) != 1 || items[0].RemainingFraction == nil || *items[0].RemainingFraction != 0 {
+		t.Fatalf("quota items = %#v, want one exhausted item", items)
+	}
+}
+
+func TestLegacyGeminiCLIQuotaAdapterReportsUpstreamStatus(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id:     "geminicli",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Executor: &fakeExecutor{identifier: legacyGeminiCLIProvider}}},
+	})
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&legacyGeminiCLIQuotaTestExecutor{quotaCode: http.StatusUnauthorized})
+	host.SetAuthManager(manager)
+	result := host.FetchQuota(context.Background(), &coreauth.Auth{
+		ID: "auth-1", Provider: legacyGeminiCLIProvider, Metadata: map[string]any{"project_id": "project-a"},
+	}, nil)
+	if !result.Handled || result.Err == nil || result.UpstreamStatus != http.StatusUnauthorized {
+		t.Fatalf("FetchQuota() = %#v, want upstream 401", result)
+	}
 }
 
 func TestLegacyGeminiCLIQuotaAdapterUsesRegisteredExecutorAndRetainsPlan(t *testing.T) {
@@ -86,6 +130,9 @@ func TestLegacyGeminiCLIQuotaAdapterUsesRegisteredExecutorAndRetainsPlan(t *test
 	}
 	if len(result.Snapshot.Items) != 1 || result.Snapshot.Items[0].ID != "gemini-pro-series" {
 		t.Fatalf("quota items = %#v", result.Snapshot.Items)
+	}
+	if remaining := result.Snapshot.Items[0].RemainingFraction; remaining == nil || *remaining != 0.25 {
+		t.Fatalf("remaining fraction = %v, want conservative 0.25", remaining)
 	}
 	if result.Snapshot.Plan == nil || result.Snapshot.Plan.ID != "g1-pro-tier" || !result.Snapshot.Plan.Stale {
 		t.Fatalf("retained plan = %#v", result.Snapshot.Plan)

@@ -2,11 +2,14 @@ package embeddedusage
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,23 +20,25 @@ import (
 
 const accountInspectionScheduleExportRecordType = "account_inspection_schedule"
 const accountInspectionSnapshotExportRecordType = "account_inspection_snapshot"
+const backupManifestRecordType = "backup_manifest"
 const usageHistoryStartCursorValue = int64(1<<63 - 1)
 
 type usageStreamEvent = internalusage.Payload
 
 type usageHistoryCursor struct {
-	SnapshotMaxID   int64  `json:"snapshot_max_id"`
-	MatchedTotal    int64  `json:"matched_total"`
-	BeforeTimestamp int64  `json:"before_timestamp_ms"`
-	BeforeID        int64  `json:"before_id"`
-	FromMS          int64  `json:"from_ms,omitempty"`
-	ToMS            int64  `json:"to_ms,omitempty"`
-	Provider        string `json:"provider,omitempty"`
-	Model           string `json:"model,omitempty"`
-	AuthIndex       string `json:"auth_index,omitempty"`
-	APIKeyHash      string `json:"api_key_hash,omitempty"`
-	Status          string `json:"status,omitempty"`
-	Search          string `json:"search,omitempty"`
+	SnapshotMaxID     int64  `json:"snapshot_max_id"`
+	MatchedTotal      int64  `json:"matched_total"`
+	BeforeTimestamp   int64  `json:"before_timestamp_ms"`
+	BeforeID          int64  `json:"before_id"`
+	FromMS            int64  `json:"from_ms,omitempty"`
+	ToMS              int64  `json:"to_ms,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	Model             string `json:"model,omitempty"`
+	AuthIndex         string `json:"auth_index,omitempty"`
+	SearchAuthIndexes string `json:"search_auth_indexes,omitempty"`
+	APIKeyHash        string `json:"api_key_hash,omitempty"`
+	Status            string `json:"status,omitempty"`
+	Search            string `json:"search,omitempty"`
 }
 
 type accountInspectionScheduleExportRecord struct {
@@ -48,6 +53,14 @@ type accountInspectionSnapshotExportRecord struct {
 	Version    int             `json:"version"`
 	Snapshot   json.RawMessage `json:"snapshot"`
 	ExportedAt int64           `json:"exported_at_ms"`
+}
+
+type backupManifestRecord struct {
+	RecordType string `json:"record_type"`
+	Version    int    `json:"version"`
+	Records    int    `json:"records"`
+	SHA256     string `json:"sha256"`
+	ExportedAt int64  `json:"exported_at_ms"`
 }
 
 type Server struct {
@@ -190,6 +203,14 @@ func parseQueryIntSigned(c *gin.Context, key string, fallback int) int {
 	return parsed
 }
 
+func allowLegacyUsageImport(c *gin.Context) bool {
+	value := strings.ToLower(strings.TrimSpace(c.Query("allow_legacy")))
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(c.GetHeader("X-CLIProxy-Allow-Legacy-Backup")))
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
 func usageEventPageLimit(requestedLimit int) int {
 	if requestedLimit <= 0 || requestedLimit > usageEventsPageLimit {
 		return usageEventsPageLimit
@@ -265,37 +286,39 @@ func usageStatusFilter(value string) (*bool, string) {
 func usageEventQueryOptionsFromCursor(cursor usageHistoryCursor, limit int) UsageEventQueryOptions {
 	failed, _ := usageStatusFilter(cursor.Status)
 	return UsageEventQueryOptions{
-		SnapshotMaxID:   cursor.SnapshotMaxID,
-		BeforeTimestamp: cursor.BeforeTimestamp,
-		BeforeID:        cursor.BeforeID,
-		FromMS:          cursor.FromMS,
-		ToMS:            cursor.ToMS,
-		Provider:        cursor.Provider,
-		Model:           cursor.Model,
-		AuthIndex:       cursor.AuthIndex,
-		APIKeyHash:      cursor.APIKeyHash,
-		Failed:          failed,
-		Search:          cursor.Search,
-		Limit:           limit,
-		MatchedTotal:    cursor.MatchedTotal,
-		SkipCount:       true,
+		SnapshotMaxID:     cursor.SnapshotMaxID,
+		BeforeTimestamp:   cursor.BeforeTimestamp,
+		BeforeID:          cursor.BeforeID,
+		FromMS:            cursor.FromMS,
+		ToMS:              cursor.ToMS,
+		Provider:          cursor.Provider,
+		Model:             cursor.Model,
+		AuthIndex:         cursor.AuthIndex,
+		SearchAuthIndexes: cursor.SearchAuthIndexes,
+		APIKeyHash:        cursor.APIKeyHash,
+		Failed:            failed,
+		Search:            cursor.Search,
+		Limit:             limit,
+		MatchedTotal:      cursor.MatchedTotal,
+		SkipCount:         true,
 	}
 }
 
 func usageHistoryCursorFromOptions(options UsageEventQueryOptions, status string, matchedTotal int64, event internalusage.Event) usageHistoryCursor {
 	return usageHistoryCursor{
-		SnapshotMaxID:   options.SnapshotMaxID,
-		MatchedTotal:    matchedTotal,
-		BeforeTimestamp: event.TimestampMS,
-		BeforeID:        event.ID,
-		FromMS:          options.FromMS,
-		ToMS:            options.ToMS,
-		Provider:        options.Provider,
-		Model:           options.Model,
-		AuthIndex:       options.AuthIndex,
-		APIKeyHash:      options.APIKeyHash,
-		Status:          status,
-		Search:          options.Search,
+		SnapshotMaxID:     options.SnapshotMaxID,
+		MatchedTotal:      matchedTotal,
+		BeforeTimestamp:   event.TimestampMS,
+		BeforeID:          event.ID,
+		FromMS:            options.FromMS,
+		ToMS:              options.ToMS,
+		Provider:          options.Provider,
+		Model:             options.Model,
+		AuthIndex:         options.AuthIndex,
+		SearchAuthIndexes: options.SearchAuthIndexes,
+		APIKeyHash:        options.APIKeyHash,
+		Status:            status,
+		Search:            options.Search,
 	}
 }
 
@@ -356,16 +379,17 @@ func (s *Server) handleUsageHistoryEvents(c *gin.Context) {
 		failed, normalizedStatus := usageStatusFilter(c.Query("status"))
 		status = normalizedStatus
 		options = UsageEventQueryOptions{
-			SnapshotMaxID: latestID,
-			FromMS:        parseQueryInt64(c, "from_ms", 0),
-			ToMS:          parseQueryInt64(c, "to_ms", 0),
-			Provider:      strings.TrimSpace(c.Query("provider")),
-			Model:         strings.TrimSpace(c.Query("model")),
-			AuthIndex:     strings.TrimSpace(c.Query("auth_index")),
-			APIKeyHash:    strings.TrimSpace(c.Query("api_key_hash")),
-			Failed:        failed,
-			Search:        strings.TrimSpace(c.Query("search")),
-			Limit:         limit,
+			SnapshotMaxID:     latestID,
+			FromMS:            parseQueryInt64(c, "from_ms", 0),
+			ToMS:              parseQueryInt64(c, "to_ms", 0),
+			Provider:          strings.TrimSpace(c.Query("provider")),
+			Model:             strings.TrimSpace(c.Query("model")),
+			AuthIndex:         strings.TrimSpace(c.Query("auth_index")),
+			SearchAuthIndexes: strings.TrimSpace(c.Query("search_auth_indexes")),
+			APIKeyHash:        strings.TrimSpace(c.Query("api_key_hash")),
+			Failed:            failed,
+			Search:            strings.TrimSpace(c.Query("search")),
+			Limit:             limit,
 		}
 	}
 
@@ -654,7 +678,22 @@ func (s *Server) exportJSONL(ctx context.Context) ([]byte, error) {
 			data = append(data, '\n')
 		}
 	}
-	return data, nil
+	digest := sha256.Sum256(data)
+	manifest, err := json.Marshal(backupManifestRecord{
+		RecordType: backupManifestRecordType,
+		Version:    1,
+		Records:    bytes.Count(data, []byte{'\n'}),
+		SHA256:     fmt.Sprintf("%x", digest),
+		ExportedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	output := make([]byte, 0, len(manifest)+1+len(data))
+	output = append(output, manifest...)
+	output = append(output, '\n')
+	output = append(output, data...)
+	return output, nil
 }
 
 func (s *Server) handleUsageExport(c *gin.Context) {
@@ -669,24 +708,19 @@ func (s *Server) handleUsageExport(c *gin.Context) {
 }
 
 func (s *Server) handleUsageImport(c *gin.Context) {
+	eventStage, err := os.CreateTemp("", "cliproxy-usage-import-*.jsonl")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	eventStagePath := eventStage.Name()
+	defer func() {
+		_ = eventStage.Close()
+		_ = os.Remove(eventStagePath)
+	}()
 	reader := bufio.NewScanner(c.Request.Body)
 	reader.Buffer(make([]byte, 64*1024), 64*1024*1024)
-	events := make([]internalusage.Event, 0, s.cfg.BatchSize)
-	result := InsertResult{}
 	totalEvents := 0
-	flushEvents := func() error {
-		if len(events) == 0 {
-			return nil
-		}
-		batchResult, err := s.store.InsertEvents(c.Request.Context(), events)
-		if err != nil {
-			return err
-		}
-		result.Inserted += batchResult.Inserted
-		result.Skipped += batchResult.Skipped
-		events = events[:0]
-		return nil
-	}
 	var modelPrices map[string]ModelPrice
 	var modelPriceRules []ModelPriceRule
 	modelPriceRecords := 0
@@ -703,6 +737,10 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 	var monitoringSettings *MonitoringSettings
 	monitoringSettingsRecords := 0
 	failed := 0
+	var manifest *backupManifestRecord
+	hashedRecords := 0
+	hasher := sha256.New()
+	nonEmptyRecords := 0
 	for reader.Scan() {
 		line := strings.TrimSpace(reader.Text())
 		if line == "" {
@@ -711,8 +749,34 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 		raw := []byte(line)
 		recordType, err := readImportRecordType(raw)
 		if err != nil {
+			nonEmptyRecords++
+			if manifest != nil {
+				_, _ = hasher.Write(raw)
+				_, _ = hasher.Write([]byte{'\n'})
+				hashedRecords++
+			}
 			failed++
 			continue
+		}
+		if recordType == backupManifestRecordType {
+			if nonEmptyRecords != 0 || manifest != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "backup manifest must be the first and only manifest record"})
+				return
+			}
+			parsed, err := parseBackupManifest(raw)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			manifest = &parsed
+			nonEmptyRecords++
+			continue
+		}
+		nonEmptyRecords++
+		if manifest != nil {
+			_, _ = hasher.Write(raw)
+			_, _ = hasher.Write([]byte{'\n'})
+			hashedRecords++
 		}
 		switch recordType {
 		case accountInspectionScheduleExportRecordType:
@@ -780,22 +844,82 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 			authRuntimeStatsRecords++
 			continue
 		}
-		event, err := internalusage.NormalizeRaw(raw)
-		if err != nil {
+		if recordType != "" {
 			failed++
 			continue
 		}
-		events = append(events, event)
+		if _, err := internalusage.NormalizeRaw(raw); err != nil {
+			failed++
+			continue
+		}
+		if _, err := eventStage.Write(raw); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if _, err := eventStage.Write([]byte{'\n'}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		totalEvents++
-		if len(events) >= s.cfg.BatchSize {
+	}
+	if err := reader.Err(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if manifest == nil && !allowLegacyUsageImport(c) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "backup manifest is required; retry with allow_legacy=1 only for a trusted legacy backup",
+		})
+		return
+	}
+	if manifest != nil {
+		actualHash := fmt.Sprintf("%x", hasher.Sum(nil))
+		if failed > 0 || hashedRecords != manifest.Records || actualHash != manifest.SHA256 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "backup manifest verification failed"})
+			return
+		}
+	}
+	result := InsertResult{}
+	batchSize := s.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	if _, err := eventStage.Seek(0, 0); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	events := make([]internalusage.Event, 0, batchSize)
+	flushEvents := func() error {
+		if len(events) == 0 {
+			return nil
+		}
+		batchResult, err := s.store.InsertEvents(c.Request.Context(), events)
+		if err != nil {
+			return err
+		}
+		result.Inserted += batchResult.Inserted
+		result.Skipped += batchResult.Skipped
+		events = events[:0]
+		return nil
+	}
+	stagedReader := bufio.NewScanner(eventStage)
+	stagedReader.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	for stagedReader.Scan() {
+		event, err := internalusage.NormalizeRaw(stagedReader.Bytes())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		events = append(events, event)
+		if len(events) >= batchSize {
 			if err := flushEvents(); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
 		}
 	}
-	if err := reader.Err(); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err := stagedReader.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	if err := flushEvents(); err != nil {
@@ -831,12 +955,7 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 			return
 		}
 	}
-	importedRoutingCursors, err := s.store.ImportRoutingCursorStates(c.Request.Context(), routingCursors)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	importedAuthRuntimeStats, err := s.store.ImportAuthRuntimeStats(c.Request.Context(), authRuntimeStats)
+	importedRoutingCursors, importedAuthRuntimeStats, err := s.store.ImportRuntimeState(c.Request.Context(), routingCursors, authRuntimeStats)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -895,6 +1014,7 @@ func (s *Server) handleUsageImport(c *gin.Context) {
 		"accountInspectionSnapshotRecords": accountInspectionSnapshotRecords,
 		"monitoringSettings":               monitoringSettings != nil,
 		"monitoringSettingsRecords":        monitoringSettingsRecords,
+		"legacyBackup":                     manifest == nil,
 	})
 }
 
@@ -926,6 +1046,25 @@ func readImportRecordType(raw []byte) (string, error) {
 		return "", err
 	}
 	return header.RecordType, nil
+}
+
+func parseBackupManifest(raw []byte) (backupManifestRecord, error) {
+	var manifest backupManifestRecord
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return backupManifestRecord{}, err
+	}
+	if manifest.Version != 1 {
+		return backupManifestRecord{}, fmt.Errorf("unsupported backup manifest version %d", manifest.Version)
+	}
+	if manifest.Records < 0 || len(manifest.SHA256) != sha256.Size*2 {
+		return backupManifestRecord{}, fmt.Errorf("invalid backup manifest")
+	}
+	for _, character := range manifest.SHA256 {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return backupManifestRecord{}, fmt.Errorf("invalid backup manifest hash")
+		}
+	}
+	return manifest, nil
 }
 
 func parseAccountInspectionScheduleImportRecord(raw []byte) (json.RawMessage, error) {
@@ -1101,7 +1240,13 @@ func (s *Server) handleQuotaCachePut(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider, fileName and data are required"})
 		return
 	}
-	if err := s.store.SetQuotaCache(c.Request.Context(), entry); err != nil {
+	var err error
+	if strings.EqualFold(entry.Provider, "xai") {
+		err = s.store.MergeXAIQuotaCache(c.Request.Context(), entry)
+	} else {
+		err = s.store.SetQuotaCache(c.Request.Context(), entry)
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

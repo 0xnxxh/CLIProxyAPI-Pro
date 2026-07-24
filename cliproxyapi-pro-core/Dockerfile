@@ -1,12 +1,17 @@
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq python3 build-essential git && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl jq python3 build-essential git; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/CLIProxyAPI
 
 ARG CLIPROXY_REPO=router-for-me/CLIProxyAPI
 ARG CLIPROXY_VERSION=""
+ARG CLIPROXY_COMMIT=""
 ARG CLIPROXY_BUILD_VERSION=""
+ARG SOURCE_DATE_EPOCH=""
 ARG GITHUB_TOKEN=""
 ARG TARGETOS
 ARG TARGETARCH
@@ -23,38 +28,40 @@ RUN set -eux; \
     fi; \
     test -n "$CLIPROXY_VERSION"; \
     test "$CLIPROXY_VERSION" != "null"; \
-    curl -fsSL "https://github.com/${CLIPROXY_REPO}/archive/refs/tags/${CLIPROXY_VERSION}.tar.gz" -o /tmp/cliproxy.tar.gz; \
+    source_ref="${CLIPROXY_COMMIT:-refs/tags/${CLIPROXY_VERSION}}"; \
+    curl -fsSL "https://github.com/${CLIPROXY_REPO}/archive/${source_ref}.tar.gz" -o /tmp/cliproxy.tar.gz; \
     tar -xzf /tmp/cliproxy.tar.gz --strip-components=1 -C /src/CLIProxyAPI; \
     rm /tmp/cliproxy.tar.gz; \
     echo "$CLIPROXY_VERSION" > /tmp/cliproxy-version
 
-COPY embeddedusage ./internal/embeddedusage
-COPY patches/apply_upstream_patches.py /tmp/apply_upstream_patches.py
-COPY patches/account_inspection_scheduler.go /tmp/account_inspection_scheduler.go
-COPY patches/routing_protection_config.go /tmp/routing_protection_config.go
-COPY patches/routing_policy.go /tmp/routing_policy.go
-COPY patches/routing_policy_test.go /tmp/routing_policy_test.go
-COPY patches/redisqueue_plugin.go /tmp/redisqueue_plugin.go
-COPY patches/redisqueue_usage_toggle.go /tmp/redisqueue_usage_toggle.go
+COPY embeddedusage /tmp/embeddedusage
+COPY patches /tmp/patches
 
-RUN python3 /tmp/apply_upstream_patches.py
+RUN python3 /tmp/patches/apply_upstream_patches.py
 
 RUN set -eux; \
     go mod tidy; \
     CLIPROXY_SOURCE_VERSION="$(cat /tmp/cliproxy-version)"; \
     if [ -z "$CLIPROXY_BUILD_VERSION" ]; then CLIPROXY_BUILD_VERSION="$CLIPROXY_SOURCE_VERSION"; fi; \
-    BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
-    CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -buildvcs=false \
+    if [ -n "$SOURCE_DATE_EPOCH" ]; then \
+      BUILD_DATE="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)"; \
+    else \
+      BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+    fi; \
+    CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -buildvcs=false -trimpath \
       -ldflags="-s -w -X 'main.Version=${CLIPROXY_BUILD_VERSION}' -X 'main.Commit=release-${CLIPROXY_SOURCE_VERSION}' -X 'main.BuildDate=${BUILD_DATE}'" \
       -o /out/CLIProxyAPI ./cmd/server/
 
-FROM debian:bookworm
+FROM debian:bookworm@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc
 
 RUN mkdir -p /CLIProxyAPI/usage
 
 COPY --from=ghcr.io/komari-monitor/komari-agent:latest /app/komari-agent /CLIProxyAPI/komari-agent
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl tzdata; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /CLIProxyAPI
 
