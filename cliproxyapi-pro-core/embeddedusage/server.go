@@ -1240,7 +1240,13 @@ func (s *Server) handleQuotaCachePut(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider, fileName and data are required"})
 		return
 	}
-	if err := s.store.SetQuotaCache(c.Request.Context(), entry); err != nil {
+	var err error
+	if strings.EqualFold(entry.Provider, "xai") {
+		err = s.store.MergeXAIQuotaCache(c.Request.Context(), entry)
+	} else {
+		err = s.store.SetQuotaCache(c.Request.Context(), entry)
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

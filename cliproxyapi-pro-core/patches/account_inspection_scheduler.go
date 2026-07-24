@@ -51,7 +51,7 @@ const (
 	accountInspectionProgressBroadcastGap   = 500 * time.Millisecond
 	accountInspectionMaxResultPageSize      = 500
 	accountInspectionMaxLogPageSize         = 500
-	accountInspectionQuotaParserVersion     = 4
+	accountInspectionQuotaParserVersion     = embeddedusage.XAIQuotaParserVersion
 )
 
 var accountInspectionWebSocketUpgrader = websocket.Upgrader{
@@ -322,6 +322,7 @@ type accountInspectionAccount struct {
 type accountInspectionHTTPResult struct {
 	StatusCode int
 	Body       string
+	Header     http.Header
 }
 
 type accountInspectionDecision struct {
@@ -2130,7 +2131,7 @@ func (s *accountInspectionScheduler) apiCall(ctx context.Context, auth *coreauth
 		}
 		defer resp.Body.Close()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-		return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw)}, nil
+		return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw), Header: resp.Header.Clone()}, nil
 	}
 	client := &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond, Transport: s.h.apiCallTransport(auth)}
 	resp, err := client.Do(req)
@@ -2139,7 +2140,7 @@ func (s *accountInspectionScheduler) apiCall(ctx context.Context, auth *coreauth
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-	return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw)}, nil
+	return accountInspectionHTTPResult{StatusCode: resp.StatusCode, Body: string(raw), Header: resp.Header.Clone()}, nil
 }
 
 func accountInspectionShouldUseExecutorHTTPRequest(auth *coreauth.Auth) bool {
@@ -2601,6 +2602,12 @@ func (s *accountInspectionScheduler) inspectXAI(ctx context.Context, account acc
 	monthlyBilling, monthlyResp, monthlyErr := s.fetchXAIBillingSummary(ctx, account, settings, xaiBillingURL(), headers)
 	status := firstInspectionStatus(monthlyResp.StatusCode, weeklyResp.StatusCode)
 	billing := mergeXAIBillingSummaries(weeklyBilling, monthlyBilling)
+	if planType, known := xaiPlanTypeFromBillingBody(monthlyResp.StatusCode, monthlyResp.Body); known {
+		if billing == nil {
+			billing = emptyXAIBillingSummary()
+		}
+		billing["planType"] = planType
+	}
 	if billing == nil {
 		if isAccountErrorStatus(weeklyResp.StatusCode) {
 			return withInspectionHTTPErrorDetail(authErrorDecision(account, weeklyResp.StatusCode), weeklyResp.Body), status, nil
@@ -2608,6 +2615,9 @@ func (s *accountInspectionScheduler) inspectXAI(ctx context.Context, account acc
 		if isAccountErrorStatus(monthlyResp.StatusCode) {
 			return withInspectionHTTPErrorDetail(authErrorDecision(account, monthlyResp.StatusCode), monthlyResp.Body), status, nil
 		}
+	}
+	billing = mergeCachedXAIFreeQuota(ctx, account, billing)
+	if billing == nil {
 		if weeklyErr != nil {
 			return accountInspectionDecision{}, status, weeklyErr
 		}
@@ -2631,7 +2641,7 @@ func (s *accountInspectionScheduler) inspectXAI(ctx context.Context, account acc
 }
 
 func accountInspectionShouldDeepProbe(decision accountInspectionDecision) bool {
-	if decision.UsedPercent == nil || decision.IsQuota {
+	if decision.IsQuota {
 		return false
 	}
 	return decision.Action == accountInspectionActionKeep || decision.Action == accountInspectionActionEnable
@@ -2661,6 +2671,7 @@ func (s *accountInspectionScheduler) applyXAIDeepProbe(ctx context.Context, acco
 			"Connection":    "Keep-Alive",
 		}, buildXAIDeepProbeBody(model), settings.Timeout)
 	})
+	observeAccountXAIQuota(ctx, account, model, resp)
 	var probeStatus *int
 	if resp.StatusCode != 0 {
 		probeStatus = intPtr(resp.StatusCode)
@@ -4072,7 +4083,7 @@ func persistQuotaState(ctx context.Context, account accountInspectionAccount, st
 		strings.ToLower(strings.TrimSpace(account.Name)),
 	}, "|")
 	fingerprint := sha256.Sum256([]byte(fingerprintSource))
-	return embeddedusage.SetQuotaCache(ctx, embeddedusage.QuotaCacheEntry{
+	entry := embeddedusage.QuotaCacheEntry{
 		ID:                  account.Provider + ":" + account.FileName,
 		Provider:            account.Provider,
 		FileName:            account.FileName,
@@ -4083,7 +4094,11 @@ func persistQuotaState(ctx context.Context, account accountInspectionAccount, st
 		ObservedAt:          observedAt,
 		AccessedAt:          now,
 		Version:             version,
-	})
+	}
+	if strings.EqualFold(strings.TrimSpace(account.Provider), "xai") {
+		return embeddedusage.MergeXAIQuotaCache(ctx, entry)
+	}
+	return embeddedusage.SetQuotaCache(ctx, entry)
 }
 
 func buildAntigravityGroups(body string) ([]map[string]any, error) {
@@ -4907,6 +4922,19 @@ func firstNonEmptyXaiProductUsage(primary any, fallback any) any {
 }
 
 func xaiSummaryUsedPercent(summary map[string]any) *float64 {
+	if strings.EqualFold(strings.TrimSpace(stringFromAny(summary["planType"])), "free") {
+		freeQuota := firstMap(summary, "freeQuota", "free_quota")
+		if boolFromAny(freeQuota["exhausted"]) {
+			value := 100.0
+			return &value
+		}
+		if used, okUsed := floatFromAny(firstAny(freeQuota, "usedTokens", "used_tokens")); okUsed {
+			if limit, okLimit := floatFromAny(firstAny(freeQuota, "limitTokens", "limit_tokens")); okLimit && limit > 0 {
+				value := math.Max(0, math.Min(100, (used/limit)*100))
+				return &value
+			}
+		}
+	}
 	for _, key := range []string{"usagePercent", "usage_percent", "usedPercent", "used_percent", "onDemandUsedPercent", "on_demand_used_percent"} {
 		if value, ok := floatFromAny(summary[key]); ok {
 			return &value
@@ -4923,6 +4951,86 @@ func xaiSummaryUsedPercent(summary map[string]any) *float64 {
 		}
 	}
 	return maxFloatPtr(values)
+}
+
+const (
+	xaiSuperGrokLimitCents      = 15_000
+	xaiXPremiumPlusLimitCents   = 20_000
+	xaiSuperGrokHeavyLimitCents = 150_000
+)
+
+func emptyXAIBillingSummary() map[string]any {
+	return map[string]any{
+		"periodType":          "unknown",
+		"usagePercent":        nil,
+		"productUsage":        []map[string]any{},
+		"monthlyLimitCents":   nil,
+		"usedCents":           nil,
+		"includedUsedCents":   nil,
+		"onDemandCapCents":    nil,
+		"onDemandUsedCents":   nil,
+		"onDemandUsedPercent": nil,
+		"usedPercent":         nil,
+	}
+}
+
+func xaiPlanTypeFromBillingBody(status int, body string) (string, bool) {
+	if status < 200 || status >= 300 {
+		return "", false
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return "", false
+	}
+	config := firstMap(payload, "config")
+	if config == nil {
+		return "", false
+	}
+	limit, hasLimit := xaiCentValue(firstAny(config, "monthlyLimit", "monthly_limit"))
+	if !hasLimit || math.Round(limit) == 0 {
+		return "free", true
+	}
+	switch int64(math.Round(limit)) {
+	case xaiSuperGrokLimitCents:
+		return "supergrok", true
+	case xaiXPremiumPlusLimitCents:
+		return "x-premium-plus", true
+	case xaiSuperGrokHeavyLimitCents:
+		return "supergrok-heavy", true
+	default:
+		return "paid-unknown", true
+	}
+}
+
+func mergeCachedXAIFreeQuota(ctx context.Context, account accountInspectionAccount, billing map[string]any) map[string]any {
+	state, ok, err := embeddedusage.GetXAIQuotaState(ctx, account.FileName)
+	if err != nil || !ok {
+		return billing
+	}
+	cachedBilling := firstMap(state, "billing")
+	freeQuota := firstMap(cachedBilling, "freeQuota", "free_quota")
+	if freeQuota == nil {
+		return billing
+	}
+	if billing == nil {
+		billing = emptyXAIBillingSummary()
+	}
+	billing["freeQuota"] = freeQuota
+	return billing
+}
+
+func observeAccountXAIQuota(ctx context.Context, account accountInspectionAccount, model string, result accountInspectionHTTPResult) {
+	_ = embeddedusage.ObserveXAIQuotaResponse(ctx, embeddedusage.XAIQuotaObservation{
+		FileName:   account.FileName,
+		AuthIndex:  account.AuthIndex,
+		Email:      account.Email,
+		Label:      firstNonEmptyStringValue(account.Name, account.DisplayName),
+		Model:      model,
+		Status:     result.StatusCode,
+		Header:     result.Header,
+		Body:       []byte(result.Body),
+		ObservedAt: time.Now(),
+	})
 }
 
 func kimiLimitLabel(item map[string]any, detail map[string]any, window map[string]any, index int) map[string]any {

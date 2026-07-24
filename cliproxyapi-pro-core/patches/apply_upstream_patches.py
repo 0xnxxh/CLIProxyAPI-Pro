@@ -204,6 +204,7 @@ new_customization_paths = (
     'internal/pluginstore/autoinstall_test.go',
     'internal/requestmeta/requestid.go',
     'internal/requestmeta/response.go',
+    'internal/runtime/executor/xai_quota_observer.go',
     'sdk/cliproxy/auth/auth_runtime_state.go',
     'sdk/cliproxy/auth/auth_runtime_state_test.go',
     'sdk/cliproxy/auth/inspection_refresh.go',
@@ -212,6 +213,97 @@ for relative_path in new_customization_paths:
     target_path = ROOT / relative_path
     if target_path.exists():
         raise SystemExit(f'upstream path collides with a Pro customization: {target_path}')
+
+write(
+    ROOT / 'internal/runtime/executor/xai_quota_observer.go',
+    re.sub(
+        r'github\.com/router-for-me/CLIProxyAPI/v\d+',
+        MODULE_PATH,
+        read_text(Path(__file__).resolve().parent / 'xai_quota_observer.go'),
+    ),
+)
+
+xai_executor = ROOT / 'internal/runtime/executor/xai_executor.go'
+xai_observation_marker = '\thelps.AppendAPIResponseChunk(ctx, e.cfg, data)\n'
+xai_executor_text = read(xai_executor)
+if 'observeXAIQuotaResponse(ctx, auth, req.Model' not in xai_executor_text:
+    if xai_executor_text.count(xai_observation_marker) != 6:
+        raise SystemExit('unexpected xAI response chunk observation anchors')
+    xai_executor_text = xai_executor_text.replace(
+        xai_observation_marker,
+        xai_observation_marker + '\tobserveXAIQuotaResponse(ctx, auth, req.Model, httpResp.StatusCode, httpResp.Header.Clone(), data)\n',
+    )
+    xai_metadata_marker = '\thelps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())\n'
+    if xai_executor_text.count(xai_metadata_marker) != 5:
+        raise SystemExit('unexpected xAI response metadata observation anchors')
+    xai_executor_text = xai_executor_text.replace(
+        xai_metadata_marker,
+        xai_metadata_marker + '\tobserveXAIQuotaResponse(ctx, auth, req.Model, httpResp.StatusCode, httpResp.Header.Clone(), nil)\n',
+    )
+    write(xai_executor, xai_executor_text)
+
+xai_websocket_executor = ROOT / 'internal/runtime/executor/xai_websockets_executor.go'
+replace_once(
+    xai_websocket_executor,
+    '''\t\tif respHS != nil && respHS.StatusCode > 0 {
+\t\t\tif sess != nil {
+''',
+    '''\t\tif respHS != nil && respHS.StatusCode > 0 {
+\t\t\tobserveXAIQuotaResponse(ctx, auth, req.Model, respHS.StatusCode, respHS.Header.Clone(), bodyErr)
+\t\t\tif sess != nil {
+''',
+    'observeXAIQuotaResponse(ctx, auth, req.Model, respHS.StatusCode',
+)
+replace_once(
+    xai_websocket_executor,
+    '''\t\t\t\tif respHSRetry != nil && respHSRetry.StatusCode > 0 {
+\t\t\t\t\treturn nil, xaiStatusErr(respHSRetry.StatusCode, bodyErrRetry)
+''',
+    '''\t\t\t\tif respHSRetry != nil && respHSRetry.StatusCode > 0 {
+\t\t\t\t\tobserveXAIQuotaResponse(ctx, auth, req.Model, respHSRetry.StatusCode, respHSRetry.Header.Clone(), bodyErrRetry)
+\t\t\t\t\treturn nil, xaiStatusErr(respHSRetry.StatusCode, bodyErrRetry)
+''',
+    'observeXAIQuotaResponse(ctx, auth, req.Model, respHSRetry.StatusCode',
+)
+replace_once(
+    xai_websocket_executor,
+    '''\t\t\thelps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+
+\t\t\tif wsErr, ok := parseXAIWebsocketError(payload); ok {
+''',
+    '''\t\t\thelps.AppendAPIWebsocketResponse(ctx, e.cfg, payload)
+\t\t\tobserveXAIQuotaResponse(ctx, auth, req.Model, 0, nil, payload)
+
+\t\t\tif wsErr, ok := parseXAIWebsocketError(payload); ok {
+''',
+    'observeXAIQuotaResponse(ctx, auth, req.Model, 0, nil, payload)',
+)
+replace_once(
+    xai_websocket_executor,
+    '''\trecordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+\treporter.StartResponseTTFT()
+''',
+    '''\trecordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+\tif respHS != nil {
+\t\tobserveXAIQuotaResponse(ctx, auth, req.Model, respHS.StatusCode, respHS.Header.Clone(), nil)
+\t}
+\treporter.StartResponseTTFT()
+''',
+    'observeXAIQuotaResponse(ctx, auth, req.Model, respHS.StatusCode, respHS.Header.Clone(), nil)',
+)
+replace_once(
+    xai_websocket_executor,
+    '''\t\t\trecordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+\t\t\treporter.StartResponseTTFT()
+''',
+    '''\t\t\trecordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+\t\t\tif respHSRetry != nil {
+\t\t\t\tobserveXAIQuotaResponse(ctx, auth, req.Model, respHSRetry.StatusCode, respHSRetry.Header.Clone(), nil)
+\t\t\t}
+\t\t\treporter.StartResponseTTFT()
+''',
+    'observeXAIQuotaResponse(ctx, auth, req.Model, respHSRetry.StatusCode, respHSRetry.Header.Clone(), nil)',
+)
 
 require_source_hash(
     ROOT / 'internal/logging/requestid.go',
@@ -2238,6 +2330,9 @@ subprocess.run([
     'internal/redisqueue/plugin_test.go',
     'internal/requestmeta/requestid.go',
     'internal/requestmeta/response.go',
+    'internal/runtime/executor/xai_executor.go',
+    'internal/runtime/executor/xai_quota_observer.go',
+    'internal/runtime/executor/xai_websockets_executor.go',
     'sdk/api/handlers/claude/code_handlers.go',
     'sdk/api/handlers/claude/code_handlers_model_test.go',
     'sdk/cliproxy/auth/auth_runtime_state.go',

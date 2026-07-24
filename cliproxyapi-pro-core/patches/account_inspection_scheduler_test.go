@@ -1302,6 +1302,56 @@ func TestBuildXAIBillingSummarySupportsWeeklyCreditsShape(t *testing.T) {
 	}
 }
 
+func TestXAIPlanTypeFromMonthlyBilling(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "free missing limit", body: `{"config": {}}`, want: "free"},
+		{name: "free ignores on demand cap", body: `{"config": {"onDemandCap": {"val": 20000}}}`, want: "free"},
+		{name: "free zero limit", body: `{"config": {"monthlyLimit": {"val": 0}}}`, want: "free"},
+		{name: "supergrok", body: `{"config": {"monthlyLimit": {"val": 15000}}}`, want: "supergrok"},
+		{name: "x premium plus", body: `{"config": {"monthlyLimit": {"val": 20000}}}`, want: "x-premium-plus"},
+		{name: "supergrok heavy", body: `{"config": {"monthlyLimit": {"val": 150000}}}`, want: "supergrok-heavy"},
+		{name: "unknown paid", body: `{"config": {"monthlyLimit": {"val": 99000}}}`, want: "paid-unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, known := xaiPlanTypeFromBillingBody(http.StatusOK, tt.body)
+			if !known || got != tt.want {
+				t.Fatalf("xaiPlanTypeFromBillingBody() = %q, %v; want %q, true", got, known, tt.want)
+			}
+		})
+	}
+	if got, known := xaiPlanTypeFromBillingBody(http.StatusUnauthorized, `{"config": {}}`); known || got != "" {
+		t.Fatalf("failed billing inferred plan = %q, %v", got, known)
+	}
+}
+
+func TestXAISummaryUsedPercentUsesFreeQuotaOnlyForFreePlan(t *testing.T) {
+	freeQuota := map[string]any{"usedTokens": 75.0, "limitTokens": 100.0, "exhausted": false}
+	free := emptyXAIBillingSummary()
+	free["planType"] = "free"
+	free["freeQuota"] = freeQuota
+	if got := xaiSummaryUsedPercent(free); got == nil || *got != 75 {
+		t.Fatalf("free used percent = %v, want 75", got)
+	}
+	paid := emptyXAIBillingSummary()
+	paid["planType"] = "x-premium-plus"
+	paid["freeQuota"] = map[string]any{"exhausted": true}
+	if got := xaiSummaryUsedPercent(paid); got != nil {
+		t.Fatalf("paid free-model exhaustion used percent = %v, want nil", got)
+	}
+}
+
+func TestAccountInspectionDeepProbesUnknownXAIQuota(t *testing.T) {
+	decision := accountInspectionDecision{Action: accountInspectionActionKeep}
+	if !accountInspectionShouldDeepProbe(decision) {
+		t.Fatal("unknown xAI quota should allow an explicitly enabled deep probe")
+	}
+}
+
 func TestMergeXAIBillingSummariesCombinesWeeklyAndMonthly(t *testing.T) {
 	weekly, _, err := buildXAIBillingSummary(`{
 		"config": {

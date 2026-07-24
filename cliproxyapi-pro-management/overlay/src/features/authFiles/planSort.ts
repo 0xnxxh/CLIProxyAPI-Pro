@@ -1,10 +1,13 @@
 import type { AuthFileItem } from '@/types';
 import { useQuotaStore } from '@/stores';
 import { normalizeProviderKey } from '@/features/authFiles/constants';
+import {
+  XAI_SUPERGROK_HEAVY_LIMIT_CENTS,
+  XAI_SUPERGROK_LIMIT_CENTS,
+  XAI_X_PREMIUM_PLUS_LIMIT_CENTS,
+} from '@/extensions/quota/xaiQuota';
 
 const PLAN_SORT_PROVIDERS = new Set(['antigravity', 'claude', 'codex', 'gemini-cli', 'xai']);
-const XAI_SUPERGROK_LIMIT_CENTS = 15_000;
-const XAI_SUPERGROK_HEAVY_LIMIT_CENTS = 150_000;
 
 const PLAN_RANKS: Record<string, Record<string, number>> = {
   antigravity: {
@@ -46,7 +49,10 @@ const PLAN_RANKS: Record<string, Record<string, number>> = {
   },
   xai: {
     'supergrok-heavy': 500,
+    'x-premium-plus': 450,
     supergrok: 400,
+    'paid-unknown': 300,
+    free: 100,
   },
 };
 
@@ -127,9 +133,11 @@ const resolvePlanSortKey = (item: AuthFileItem, quotaStore: PlanSortQuotaStore):
     rawPlan =
       monthlyLimitCents === XAI_SUPERGROK_HEAVY_LIMIT_CENTS
         ? 'supergrok-heavy'
+        : monthlyLimitCents === XAI_X_PREMIUM_PLUS_LIMIT_CENTS
+          ? 'x-premium-plus'
         : monthlyLimitCents === XAI_SUPERGROK_LIMIT_CENTS
           ? 'supergrok'
-          : readPlanField(item, 'planType', 'plan_type', 'plan', 'package');
+          : billing?.planType ?? readPlanField(item, 'planType', 'plan_type', 'plan', 'package');
   }
 
   const label = normalizePlan(rawPlan);

@@ -1,6 +1,7 @@
 import type { AuthFileItem } from '@/types';
 import { useQuotaStore } from '@/stores';
 import { normalizeProviderKey } from '@/features/authFiles/constants';
+import { xaiFreeQuotaRemainingPercent } from '@/extensions/quota/xaiQuota';
 
 const QUOTA_SORT_PROVIDERS = new Set([
   'antigravity',
@@ -113,6 +114,12 @@ const xaiRemainingPercent = (quota: unknown): number | null => {
   if (!state || state.status !== 'success' || !isFreshQuotaState(state)) return null;
   const billing = toRecord(state.billing);
   if (!billing) return null;
+
+  const planType = String(billing.planType ?? billing.plan_type ?? '').trim().toLowerCase();
+  if (planType === 'free') {
+    const freeRemaining = xaiFreeQuotaRemainingPercent(billing);
+    if (freeRemaining !== null) return freeRemaining;
+  }
 
   const usedPercent = normalizeNumber(billing.usagePercent ?? billing.usage_percent);
   if (usedPercent !== null) return clampPercent(100 - clampPercent(usedPercent));

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildInspectionResultsViewState,
   getPaginationRange,
+  isXaiQuotaLow,
   toSettingsDraft,
 } from '../src/features/monitoring/accountInspectionPageModel';
 import {
@@ -58,5 +59,20 @@ describe('account inspection page model', () => {
       workers: String(DEFAULT_ACCOUNT_INSPECTION_SETTINGS.workers),
       targetType: DEFAULT_ACCOUNT_INSPECTION_SETTINGS.targetType,
     });
+  });
+
+  test('uses free-token exhaustion only for free xAI plans', () => {
+    expect(isXaiQuotaLow({
+      status: 'success',
+      billing: { planType: 'free', freeQuota: { exhausted: true } },
+    }, 90)).toBe(true);
+    expect(isXaiQuotaLow({
+      status: 'success',
+      billing: {
+        planType: 'x-premium-plus',
+        usagePercent: 10,
+        freeQuota: { exhausted: true },
+      },
+    }, 90)).toBe(false);
   });
 });

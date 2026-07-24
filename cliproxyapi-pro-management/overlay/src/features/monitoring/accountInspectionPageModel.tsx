@@ -528,7 +528,22 @@ export const isAntigravityQuotaLow = (
 export const isXaiQuotaLow = (quota: unknown, usedPercentThreshold: number) => {
   if (!isRecordValue(quota) || quota.status !== 'success') return false;
   if (!isRecordValue(quota.billing)) return false;
-  const used =
+  const planType = String(quota.billing.planType ?? quota.billing.plan_type ?? '').trim().toLowerCase();
+  const freeQuotaCandidate = quota.billing.freeQuota ?? quota.billing.free_quota;
+  const freeQuota = isRecordValue(freeQuotaCandidate) ? freeQuotaCandidate : null;
+  const freeUsed = planType === 'free' && freeQuota
+    ? (freeQuota.exhausted === true
+      ? 100
+      : (() => {
+          const usedTokens = normalizeNumberValue(freeQuota.usedTokens ?? freeQuota.used_tokens);
+          const limitTokens = normalizeNumberValue(freeQuota.limitTokens ?? freeQuota.limit_tokens);
+          return usedTokens !== null && limitTokens !== null && limitTokens > 0
+            ? Math.max(0, Math.min(100, (usedTokens / limitTokens) * 100))
+            : null;
+        })())
+    : null;
+  const used = freeUsed
+    ??
     normalizeNumberValue(quota.billing.usagePercent ?? quota.billing.usage_percent)
     ?? normalizeNumberValue(quota.billing.usedPercent ?? quota.billing.used_percent)
     ?? maxAntigravityGroupUsedPercent(Array.isArray(quota.billing.productUsage) ? quota.billing.productUsage : []);

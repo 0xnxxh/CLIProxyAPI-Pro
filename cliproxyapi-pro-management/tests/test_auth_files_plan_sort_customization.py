@@ -155,6 +155,8 @@ class AuthFilesSortingCustomizationTest(unittest.TestCase):
                 data = json.loads((locales_dir / name).read_text())
                 self.assertEqual(labels[0], data['auth_files']['sort_plan_desc'])
                 self.assertEqual(labels[1], data['auth_files']['sort_quota_desc'])
+                self.assertEqual('X Premium+', data['xai_quota']['plan_x_premium_plus'])
+                self.assertIn('free_quota_window', data['xai_quota'])
 
 
 if __name__ == '__main__':
