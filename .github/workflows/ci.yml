@@ -6,14 +6,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      upstream_mode:
-        description: Upstream versions to validate
-        type: choice
-        options:
-          - pinned
-          - latest
-        default: pinned
 
 permissions:
   contents: read
@@ -37,7 +29,6 @@ jobs:
       management_repo: ${{ steps.resolve.outputs.management_repo }}
       management_tag: ${{ steps.resolve.outputs.management_tag }}
       management_sha: ${{ steps.resolve.outputs.management_sha }}
-      mode: ${{ steps.resolve.outputs.mode }}
 
     steps:
       - name: Checkout customizations
@@ -47,24 +38,17 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REQUESTED_MODE: ${{ inputs.upstream_mode || 'pinned' }}
+          CORE_UPSTREAM_REPO: router-for-me/CLIProxyAPI
+          MANAGEMENT_UPSTREAM_REPO: router-for-me/Cli-Proxy-API-Management-Center
         run: |
           set -euo pipefail
-          source compatibility/upstream.env
-
-          mode="${REQUESTED_MODE:-pinned}"
-          core_tag="${CORE_UPSTREAM_TAG}"
-          management_tag="${MANAGEMENT_UPSTREAM_TAG}"
-          if [ "${mode}" = "latest" ]; then
-            core_tag="$(gh api "repos/${CORE_UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
-            management_tag="$(gh api "repos/${MANAGEMENT_UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
-          fi
+          core_tag="$(gh api "repos/${CORE_UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+          management_tag="$(gh api "repos/${MANAGEMENT_UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
           core_sha="$(gh api "repos/${CORE_UPSTREAM_REPO}/commits/${core_tag}" --jq '.sha')"
           core_commit_date="$(gh api "repos/${CORE_UPSTREAM_REPO}/commits/${core_sha}" --jq '.commit.committer.date')"
           core_source_date_epoch="$(date -u -d "${core_commit_date}" +%s)"
           management_sha="$(gh api "repos/${MANAGEMENT_UPSTREAM_REPO}/commits/${management_tag}" --jq '.sha')"
 
-          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
           echo "core_repo=${CORE_UPSTREAM_REPO}" >> "${GITHUB_OUTPUT}"
           echo "core_tag=${core_tag}" >> "${GITHUB_OUTPUT}"
           echo "core_sha=${core_sha}" >> "${GITHUB_OUTPUT}"
@@ -134,7 +118,7 @@ jobs:
 
       - name: Validate Core customization
         env:
-          VALIDATION_RACE: ${{ needs.resolve-upstream.outputs.mode == 'latest' && '1' || '0' }}
+          VALIDATION_RACE: "1"
         run: bash customizations-repo/scripts/validation/core.sh upstream-core
 
   source-image-build:

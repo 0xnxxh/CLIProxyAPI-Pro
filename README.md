@@ -34,7 +34,6 @@ CLIProxyAPI Pro 是对两个 upstream 项目的最小化定制层集合：
 │   ├── monitoring-locales.json
 │   └── overlay/
 │
-├── compatibility/upstream.env
 ├── scripts/validation/
 └── .github/workflows/
     ├── ci.yml

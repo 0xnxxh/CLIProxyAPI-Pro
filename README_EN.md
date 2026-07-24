@@ -34,7 +34,6 @@ This project does not maintain a full fork of either upstream project. Instead, 
 │   ├── monitoring-locales.json
 │   └── overlay/
 │
-├── compatibility/upstream.env
 ├── scripts/validation/
 └── .github/workflows/
     ├── ci.yml
